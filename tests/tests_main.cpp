@@ -30,6 +30,7 @@ NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVE
 #include "avg_pool_2d_f32_test.hpp"
 #include "avg_pool_2d_f32_gaudi2_test.hpp"
 #include "cast_f16_to_i16_gaudi2_test.hpp"
+#include "quantize_f32_test.hpp"
 
 int main(int argc, char** argv)
 {
@@ -71,8 +72,9 @@ int main(int argc, char** argv)
 
             "AvgPool2DFwdF32Gaudi2Test  Run AvgPool2DFwdF32Gaudi2Test only   " << std::endl <<
             "AvgPool2DBwdF32Gaudi2Test  Run AvgPool2DBwdF32Gaudi2Test only   " << std::endl <<
-            "CastF16toI16Gaudi2Test     Run CastF16toI16Gaudi2Test only   " << std::endl;
-
+            "CastF16toI16Gaudi2Test     Run CastF16toI16Gaudi2Test only   " << std::endl <<
+            "QuantizeFwdF32             Run QuantizeFwdF32 only   " << std::endl <<
+            "QuantizeBwdF32             Run QuantizeBwdF32 only   " << std::endl;
         exit(0);
     }
 
@@ -318,6 +320,39 @@ int main(int argc, char** argv)
         testRelu.SetUp();
         result = testRelu.runTest(GAUDI_KERNEL_RELU_BWD_BF16);
         testRelu.TearDown();
+        testCount ++;
+        if (result != 0)
+        {
+            return result;
+        }
+    }
+
+    QuantizeF32Test testQuantize;
+    if(argc == 1 ||
+        (argc == 3 && (((strcmp(argv[1], "--device") ==0) || (strcmp(argv[1], "-d") ==0))
+        && (strcmp(argv[2],"Gaudi") ==0)))  ||
+        (argc == 3 && (((strcmp(argv[1], "--test") ==0) || (strcmp(argv[1], "-t") ==0))
+        && (strcmp(argv[2],"QuantizeFwdF32") ==0))))
+    {
+        testQuantize.SetUp();
+        result = testQuantize.runTest(GAUDI_KERNEL_QUANTIZE_FWD_F32);
+        testQuantize.TearDown();
+        testCount ++;
+        if (result != 0)
+        {
+            return result;
+        }
+    }
+
+    if(argc == 1 ||
+        (argc == 3 && (((strcmp(argv[1], "--device") ==0) || (strcmp(argv[1], "-d") ==0))
+        && (strcmp(argv[2],"Gaudi") ==0)))  ||
+        (argc == 3 && (((strcmp(argv[1], "--test") ==0) || (strcmp(argv[1], "-t") ==0))
+        && (strcmp(argv[2],"QuantizeBwdF32") ==0))))
+    {
+        testQuantize.SetUp();
+        result = testQuantize.runTest(GAUDI_KERNEL_QUANTIZE_BWD_F32);
+        testQuantize.TearDown();
         testCount ++;
         if (result != 0)
         {

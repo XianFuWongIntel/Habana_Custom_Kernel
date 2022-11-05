@@ -30,6 +30,7 @@ NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVE
 #include "avg_pool_2d_f32.hpp"
 #include "avg_pool_2d_f32_gaudi2.hpp"
 #include "cast_f16_to_i16_gaudi2.hpp"
+#include "quantize_f32.hpp"
 
 #include "entry_points.hpp"
 
@@ -89,7 +90,10 @@ gcapi::GlueCodeReturn_t GetKernelNames(_OUT_ char**         names,
            avgpool2dfwdf32Instance.GetKernelName(names[GAUDI_KERNEL_AVG_POOL_2D_FWD_F32]);
            AvgPool2dF32 avgpool2dbwdf32Instance(AvgPool2dF32::bwd);
            avgpool2dbwdf32Instance.GetKernelName(names[GAUDI_KERNEL_AVG_POOL_2D_BWD_F32]);
-
+           QuantizeF32 QuantizeFwdF32Instance(QuantizeF32::fwd);
+           QuantizeFwdF32Instance.GetKernelName(names[GAUDI_KERNEL_QUANTIZE_FWD_F32]);
+           QuantizeF32 QuantizeBwdF32Instance(QuantizeF32::bwd);
+           QuantizeBwdF32Instance.GetKernelName(names[GAUDI_KERNEL_QUANTIZE_BWD_F32]);
         }
 
         if (kernelCount != nullptr)
@@ -293,6 +297,20 @@ HabanaKernel(_IN_  gcapi::HabanaKernelParams_t* params,
     if (strcmp(params->nodeName, kernelName) == 0)
     {
         return avgpool2dbwdf32Instance.GetGcDefinitions(params, instance);
+    }
+
+    QuantizeF32 quantizefwdf32Instance(QuantizeF32::fwd);
+    quantizefwdf32Instance.GetKernelName(kernelName);
+    if (strcmp(params->nodeName, kernelName) == 0)
+    {
+        return quantizefwdf32Instance.GetGcDefinitions(params, instance);
+    }
+
+    QuantizeF32 quantizebwdf32Instance(QuantizeF32::bwd);
+    quantizebwdf32Instance.GetKernelName(kernelName);
+    if (strcmp(params->nodeName, kernelName) == 0)
+    {
+        return quantizebwdf32Instance.GetGcDefinitions(params, instance);
     }
 
     /////// --- Gaudi2 

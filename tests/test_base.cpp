@@ -64,6 +64,7 @@ void TestBase::PrintKernelInputParams(const gcapi::HabanaKernelParams_t* gc_inpu
 {
     std::stringstream ss;
     ss << "Kernel Input Params:" << std::endl;
+    ss << "\tname = "  << gc_input->nodeName          << std::endl;
     ss << "\tinputTensorNr = "  << gc_input->inputTensorNr          << std::endl;
     for (unsigned i = 0; i < gc_input->inputTensorNr; i++)
     {

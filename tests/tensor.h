@@ -257,7 +257,37 @@ public:
         }
     }
 
-    Tensor& operator*=(const T & value)
+    void loadData(std::vector<std::vector<std::vector<std::vector<T>>>> &vec)
+    {
+        std::vector<T> flatten_vec;
+        const int n_size = vec.size();
+        const int c_size = vec[0].size();
+        const int h_size = vec[0][0].size();
+        const int w_size = vec[0][0][0].size();
+
+        for (int n = 0; n < n_size; n++)
+            for (int c = 0; c < c_size; c++)
+                for (int h = 0; h < h_size; h++)
+                    for (int w = 0; w < w_size; w++)
+                    {
+                        flatten_vec.push_back(vec[n][c][h][w]);
+                    }
+
+        for (int i = 0; i < m_element_count; i++)
+        {
+            m_pdata[i] = flatten_vec[i];
+        }
+    }
+
+    void loadData(std::vector<T> &vec)
+    {
+        for (int i = 0; i < m_element_count; i++)
+        {
+            m_pdata[i] = vec[i];
+        }
+    }
+
+    Tensor &operator*=(const T &value)
     {
         for (int i = 0 ; i < m_element_count; i++)
         {
