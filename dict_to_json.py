@@ -1,9 +1,11 @@
+import os
 import torch
 import json
 from json import JSONEncoder
 import numpy
 
-file_path = "test_binaries/quant_io"
+rootdir = "test_binaries/"
+extensions = (".pth")
 
 class NumpyArrayEncoder(JSONEncoder):
     def default(self, obj):
@@ -11,7 +13,14 @@ class NumpyArrayEncoder(JSONEncoder):
             return obj.tolist()
         return JSONEncoder.default(self, obj)
 
-od1 = torch.load(file_path + ".pth")
+for subdir, dirs, files in os.walk(rootdir):
+    for file in files:
+        ext = os.path.splitext(file)[-1].lower()
+        if ext in extensions:
+            fn_wihout_ext = os.path.splitext(file)[0]
+            filepath = os.path.join(subdir, file)
+            print("Processing '" + os.path.join(subdir, file) + "'..")
+            od1 = torch.load(filepath)
 
-with open(file_path + ".json", "w") as pf:
-    json.dump(od1, pf, cls=NumpyArrayEncoder, indent=4)
+            with open(os.path.join(subdir, fn_wihout_ext) + ".json", "w") as pf:
+                json.dump(od1, pf, cls=NumpyArrayEncoder, indent=4)

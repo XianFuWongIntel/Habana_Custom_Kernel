@@ -127,6 +127,32 @@ gcapi::GlueCodeReturn_t QuantizeF32::GetGcDefinitions(
     out_defs->inputTensorAccessPattern[0].dim[1].start_b = 0;
     out_defs->inputTensorAccessPattern[0].dim[1].end_b = c_unrollCount - 1;
 
+    out_defs->inputTensorAccessPattern[1].allRequired = true;
+    out_defs->inputTensorAccessPattern[1].dim[0].dim = 0;
+    out_defs->inputTensorAccessPattern[1].dim[0].start_a = elementsInVec;
+    out_defs->inputTensorAccessPattern[1].dim[0].end_a = elementsInVec;
+    out_defs->inputTensorAccessPattern[1].dim[0].start_b = 0;
+    out_defs->inputTensorAccessPattern[1].dim[0].end_b = elementsInVec - 1;
+
+    out_defs->inputTensorAccessPattern[1].dim[1].dim = 1;
+    out_defs->inputTensorAccessPattern[1].dim[1].start_a = c_unrollCount;
+    out_defs->inputTensorAccessPattern[1].dim[1].end_a = c_unrollCount;
+    out_defs->inputTensorAccessPattern[1].dim[1].start_b = 0;
+    out_defs->inputTensorAccessPattern[1].dim[1].end_b = c_unrollCount - 1;
+
+    out_defs->inputTensorAccessPattern[2].allRequired = true;
+    out_defs->inputTensorAccessPattern[2].dim[0].dim = 0;
+    out_defs->inputTensorAccessPattern[2].dim[0].start_a = elementsInVec;
+    out_defs->inputTensorAccessPattern[2].dim[0].end_a = elementsInVec;
+    out_defs->inputTensorAccessPattern[2].dim[0].start_b = 0;
+    out_defs->inputTensorAccessPattern[2].dim[0].end_b = elementsInVec - 1;
+
+    out_defs->inputTensorAccessPattern[2].dim[1].dim = 1;
+    out_defs->inputTensorAccessPattern[2].dim[1].start_a = c_unrollCount;
+    out_defs->inputTensorAccessPattern[2].dim[1].end_a = c_unrollCount;
+    out_defs->inputTensorAccessPattern[2].dim[1].start_b = 0;
+    out_defs->inputTensorAccessPattern[2].dim[1].end_b = c_unrollCount - 1;
+
     // f_start f(i) = 1*i + 0;
     // f_end   f(i) = 1*i + 0;
     // Resource 0 (IFM) dim 1-4
@@ -137,6 +163,18 @@ gcapi::GlueCodeReturn_t QuantizeF32::GetGcDefinitions(
         out_defs->inputTensorAccessPattern[0].dim[dims].end_a = 1;
         out_defs->inputTensorAccessPattern[0].dim[dims].start_b = 0;
         out_defs->inputTensorAccessPattern[0].dim[dims].end_b = 1 - 1;
+
+        out_defs->inputTensorAccessPattern[1].dim[dims].dim = dims;
+        out_defs->inputTensorAccessPattern[1].dim[dims].start_a = 1;
+        out_defs->inputTensorAccessPattern[1].dim[dims].end_a = 1;
+        out_defs->inputTensorAccessPattern[1].dim[dims].start_b = 0;
+        out_defs->inputTensorAccessPattern[1].dim[dims].end_b = 1 - 1;
+
+        out_defs->inputTensorAccessPattern[2].dim[dims].dim = dims;
+        out_defs->inputTensorAccessPattern[2].dim[dims].start_a = 1;
+        out_defs->inputTensorAccessPattern[2].dim[dims].end_a = 1;
+        out_defs->inputTensorAccessPattern[2].dim[dims].start_b = 0;
+        out_defs->inputTensorAccessPattern[2].dim[dims].end_b = 1 - 1;
     }
 
     // f_start f(i) = elementsInVec*i + 0;

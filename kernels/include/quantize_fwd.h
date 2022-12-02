@@ -17,6 +17,13 @@ NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVE
 
 #include "kernel_config.h"
 
+typedef enum _ScaleType
+{
+    SINGLE_SCALE,
+    PER_WEIGHT_CHANNEL,
+    PER_ACTIVATION_CHANNEL
+} ScaleType;
+
 void main(tensor input, tensor input_low, tensor input_range, tensor output, int levels)
 {
     const int depth = 0;
@@ -28,7 +35,7 @@ void main(tensor input, tensor input_low, tensor input_range, tensor output, int
     const int5 indexSpaceStart = get_index_space_offset();
     const int5 indexSpaceEnd = get_index_space_size() + indexSpaceStart;
 
-    int5 ifmCoords = {0, 0, 0, 0, 0};
+    int5 ifmCoords, lowRangeCoords = {0, 0, 0, 0, 0};
 
     // DEPTH
     const int depthStep = VECTOR_SIZE;
@@ -55,9 +62,26 @@ void main(tensor input, tensor input_low, tensor input_range, tensor output, int
     const int fifthDimStart = indexSpaceStart[fifthDim];
     const int fifthDimEnd = indexSpaceEnd[fifthDim];
 
-    // load tensors as scalars, only works for 'single_scale' mode
-    float input_low_val = s_f32_ld_g((__global__ float *)gen_addr(ifmCoords, input_low));
-    float input_range_val = s_f32_ld_g((__global__ float *)gen_addr(ifmCoords, input_range));
+    int scale_dim = 5;
+    int scale_count = 1;
+
+    ScaleType scale_type = SINGLE_SCALE;
+    for (int i = 0; i < scale_dim; i++)
+    {
+        scale_count *= get_dim_size(input_range, i);
+    }
+
+    if (scale_count > 1)
+    {
+        if (get_dim_size(input_range, 0) > 1)
+        {
+            scale_type = PER_WEIGHT_CHANNEL;
+        }
+        else if (get_dim_size(input_range, 2) > 1)
+        {
+            scale_type = PER_ACTIVATION_CHANNEL;
+        }
+    }
 
 #pragma loop_taken
     for (int d = depthStart; d < depthEnd; d += depthStep)
@@ -73,12 +97,15 @@ void main(tensor input, tensor input_low, tensor input_range, tensor output, int
             for (int b = batchStart; b < batchEnd; b += batchStep)
             {
                 ifmCoords[batch] = b;
+                if (scale_type == PER_WEIGHT_CHANNEL)
+                    lowRangeCoords[depth] = b;
 
 #pragma loop_taken
                 for (int h = heightStart; h < heightEnd; h += heightStep)
                 {
                     ifmCoords[height] = h;
-
+                    if (scale_type == PER_ACTIVATION_CHANNEL)
+                        lowRangeCoords[height] = h;
 #pragma loop_taken
 #pragma unroll 4
                     for (int w = widthStart; w < widthEnd; w += 1)
@@ -86,6 +113,9 @@ void main(tensor input, tensor input_low, tensor input_range, tensor output, int
                         ifmCoords[width] = w;
 
                         float64 input_val = v_f32_ld_tnsr_b(ifmCoords, input);
+                        float64 input_low_val = s_f32_ld_g((__global__ float *)gen_addr(lowRangeCoords, input_low));
+                        float64 input_range_val = s_f32_ld_g((__global__ float *)gen_addr(lowRangeCoords, input_range));
+
                         float64 scale = (levels - 1) / input_range_val;
                         float64 output_val = v_f32_max_b(v_f32_min_b(input_val, input_low_val + input_range_val), input_low_val);
                         float64 zero_point = v_f32_nearbyint_b(-input_low_val * scale);
@@ -93,7 +123,9 @@ void main(tensor input, tensor input_low, tensor input_range, tensor output, int
                         output_val -= input_low_val;
                         output_val *= scale;
                         output_val -= zero_point;
-                        output_val = v_f32_nearbyint_b(output_val);
+
+                        output_val = v_f32_nearbyint_b(output_val + 0.5f, SW_RD);
+                        // output_val = v_f32_nearbyint_b(output_val);
                         output_val = output_val / scale;
 
                         v_f32_st_tnsr(ifmCoords, output, output_val);

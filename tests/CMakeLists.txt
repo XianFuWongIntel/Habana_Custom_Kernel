@@ -30,6 +30,16 @@ include_directories(../src/gaudi_src                          # include headers 
 # Select files to compile
 file(GLOB TESTS_FILES *.cpp gaudi_test/*.cpp gaudi2_test/*.cpp)
 
+if(NOT DEFINED TEST_NUM)
+    set(TEST_NUM 1)
+endif(NOT DEFINED TEST_NUM)
+
+if(NOT DEFINED IS_WEIGHT)
+    set(IS_WEIGHT 0)
+endif(NOT DEFINED IS_WEIGHT)
+
+add_definitions(-DTEST_BIN=${TEST_NUM} -DIS_WEIGHT=${IS_WEIGHT})
+
 # Create test executable
 add_executable(${TEST_TARGET} ${TESTS_FILES})
 
