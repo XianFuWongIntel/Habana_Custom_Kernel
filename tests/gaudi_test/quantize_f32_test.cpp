@@ -398,7 +398,7 @@ int QuantizeF32Test::runTest(Gaudi_Kernel_Name_e NameofKernel)
         return -1;
     }
     // generate and load tensor descriptors
-    std::vector<TensorDescriptor> vec;
+    std::vector<TensorDesc> vec;
     if (NameofKernel == GAUDI_KERNEL_QUANTIZE_BWD_F32 || NameofKernel == GAUDI_KERNEL_QUANTIZE_BWD_F32)
         vec.push_back(input.GetTensorDescriptor());
 
