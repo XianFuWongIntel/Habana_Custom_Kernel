@@ -30,6 +30,8 @@ NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVE
 #define RN18_8BIT_WQ_ASYM_AQ_SYM_PER_CHANNEL 4
 #define RN18_8BIT_WQ_SYM_AQ_ASYM_PER_CHANNEL 5
 #define RN18_8BIT_WQ_SYM_AQ_ASYM_PER_TENSOR 6
+#define ACT_QIO_RN18_8BIT_WQ_ASYM_AQ_SYM_PER_CHANNEL 7
+#define WT_QIO_RN18_8BIT_WQ_ASYM_AQ_SYM_PER_CHANNEL 8
 
 using json = nlohmann::json;
 #endif
@@ -130,6 +132,7 @@ int QuantizeF32Test::runTest(Gaudi_Kernel_Name_e NameofKernel)
     std::string fn(ROOT_DIR);
     json test_bin;
     bool is_single_scale;
+    bool is_weight = (IS_WEIGHT) ? true : false;
 
 #if TEST_BIN == QUANT_IO
     fn.append("quant_io.json");
@@ -216,8 +219,26 @@ int QuantizeF32Test::runTest(Gaudi_Kernel_Name_e NameofKernel)
     std::vector<float> test_input_low = test_content["i"]["input_low"];
     std::vector<float> test_input_range = test_content["i"]["input_range"];
 #endif
+#elif TEST_BIN == ACT_QIO_RN18_8BIT_WQ_ASYM_AQ_SYM_PER_CHANNEL
+    is_weight = false;
+    fn.append("act-qio_rn18-8bit-wq-asym-aq-sym-per-channel.json");
+    std::ifstream test_file(fn, std::ifstream::binary);
+    test_file >> test_bin;
+    is_single_scale = false;
+    auto test_content = test_bin["ResNet/Sequential[layer4]/BasicBlock[0]/ReLU[relu]/relu__1|OUTPUT"]["Forward"];
+    std::vector<std::vector<std::vector<std::vector<float>>>> test_input_low = test_content["i"]["input_low"];
+    std::vector<std::vector<std::vector<std::vector<float>>>> test_input_range = test_content["i"]["input_range"];
+#elif TEST_BIN == WT_QIO_RN18_8BIT_WQ_ASYM_AQ_SYM_PER_CHANNEL
+    is_weight = true;
+    fn.append("wt-qio_rn18-8bit-wq-asym-aq-sym-per-channel.json");
+    std::ifstream test_file(fn, std::ifstream::binary);
+    test_file >> test_bin;
+    is_single_scale = false;
+    auto test_content = test_bin["ResNet/NNCFConv2d[conv1]/conv2d_0|WEIGHT"]["Forward"];
+    std::vector<std::vector<std::vector<std::vector<float>>>> test_input_low = test_content["i"]["input_low"];
+    std::vector<std::vector<std::vector<std::vector<float>>>> test_input_range = test_content["i"]["input_range"];
 #else
-#error Invalid 'TEST_NUM', rerun cmake with '-DTEST_NUM=[1-6]'
+#error Invalid 'TEST_NUM', rerun cmake with '-DTEST_NUM=[1-8]'
 #endif
     std::vector<std::vector<std::vector<std::vector<float>>>> test_input = test_content["i"]["input_"];
     int test_levels = test_content["i"]["levels"].get<int>();
@@ -238,8 +259,8 @@ int QuantizeF32Test::runTest(Gaudi_Kernel_Name_e NameofKernel)
 
     if (!is_single_scale)
     {
-        scaleinitializer[0] = (IS_WEIGHT) ? batch : 1;
-        scaleinitializer[2] = (IS_WEIGHT) ? 1 : height;
+        scaleinitializer[0] = (is_weight) ? batch : 1;
+        scaleinitializer[2] = (is_weight) ? 1 : height;
     }
 #else
     const uint height = 5;
@@ -450,21 +471,31 @@ int QuantizeF32Test::runTest(Gaudi_Kernel_Name_e NameofKernel)
     std::cout << "\tref\t:" << ref_max << std::endl;
     std::cout << "Max Abs\t:" << max_abs << std::endl;
 
-    if (NameofKernel == GAUDI_KERNEL_QUANTIZE_FWD_F32)
-        if (mismatched)
-            std::cout << "Quantize FWD F32 test failed!!" << std::endl;
-        else
-            std::cout << "Quantize FWD F32 test pass!!" << std::endl;
-    else if (mismatched)
-        std::cout << "Quantize BWD F32 test failed!!" << std::endl;
-    else
-        std::cout << "Quantize BWD F32 test pass!!" << std::endl;
-
     std::cout << "Test JSON:\t" << fn << "\t";
-    if (IS_WEIGHT)
+    if (is_weight)
         std::cout << "(PER_WEIGHT_CHANNEL)" << std::endl;
     else
         std::cout << "(PER_ACTIVATION_CHANNEL)" << std::endl;
 
-    return 0;
+    if (NameofKernel == GAUDI_KERNEL_QUANTIZE_FWD_F32)
+        if (mismatched)
+        {
+            std::cout << "Quantize FWD F32 test failed!!" << std::endl;
+            return -1;
+        }
+        else
+        {
+            std::cout << "Quantize FWD F32 test pass!!" << std::endl;
+            return 0;
+        }
+    else if (mismatched)
+    {
+        std::cout << "Quantize BWD F32 test failed!!" << std::endl;
+        return -1;
+    }
+    else
+    {
+        std::cout << "Quantize BWD F32 test pass!!" << std::endl;
+        return 0;
+    }
 }
