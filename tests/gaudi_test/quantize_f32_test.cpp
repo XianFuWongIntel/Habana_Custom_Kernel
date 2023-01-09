@@ -259,7 +259,7 @@ int QuantizeF32Test::runTest(Gaudi_Kernel_Name_e NameofKernel)
 
     if (!is_single_scale)
     {
-        scaleinitializer[0] = (is_weight) ? batch : 1;
+        scaleinitializer[3] = (is_weight) ? batch : 1;
         scaleinitializer[2] = (is_weight) ? 1 : height;
     }
 #else

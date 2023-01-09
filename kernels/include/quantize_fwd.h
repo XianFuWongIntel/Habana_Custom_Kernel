@@ -73,7 +73,7 @@ void main(tensor input, tensor input_low, tensor input_range, tensor output, int
 
     if (scale_count > 1)
     {
-        if (get_dim_size(input_range, 0) > 1)
+        if (get_dim_size(input_range, 3) > 1)
         {
             scale_type = PER_WEIGHT_CHANNEL;
         }
@@ -98,7 +98,7 @@ void main(tensor input, tensor input_low, tensor input_range, tensor output, int
             {
                 ifmCoords[batch] = b;
                 if (scale_type == PER_WEIGHT_CHANNEL)
-                    lowRangeCoords[depth] = b;
+                    lowRangeCoords[batch] = b;
 
 #pragma loop_taken
                 for (int h = heightStart; h < heightEnd; h += heightStep)
