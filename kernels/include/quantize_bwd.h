@@ -13,33 +13,33 @@ DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCL
 OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
 NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ********************************************************************/
+// #pragma tpc_printf(enable)
 
 #include "kernel_config.h"
 
+typedef enum _ScaleType
+{
+    SINGLE_SCALE,
+    PER_WEIGHT_CHANNEL,
+    PER_ACTIVATION_CHANNEL
+} ScaleType;
 
-#if defined(FLOAT32)
-    #define PLUS_INF        0x7f800000
-    #define  v_sel_grt_b(grad, output) \
-                                v_i32_sel_grt_i32_b((int64)grad, PLUS_INF, (int64)grad, (int64)output);
-#elif defined(BFLOAT16)
-    #define PLUS_INF        0x7F80
-    #define  v_sel_grt_b(grad, output) \
-                        v_i16_sel_grt_i16_b((short128)grad, PLUS_INF, (short128)grad, (short128)output);
-#endif
-
-void main(tensor grad, tensor input, tensor output)
+void main(tensor grad_output, tensor input, tensor input_low, tensor input_range, tensor grad_input, tensor grad_input_low, tensor grad_input_range, int levels, int level_low, int level_high)
 {
     const int depth = 0;
     const int width = 1;
     const int height = 2;
     const int batch = 3;
-    const int fifthDim = 4;    
-    /*Special cases handled:
-      input = nan,        grad = validValue, TF output = 0
-      input = validValue, grad = nan,        TF output = nan
-      input = nan,        grad = nan,        TF output = nan*/
+    const int fifthDim = 4;
+
+    float64 grad_input_low_l_acc = 0.0f;
+    float64 grad_input_range_l_acc = 0.0f;
+
     const int5 indexSpaceStart = get_index_space_offset();
     const int5 indexSpaceEnd = get_index_space_size() + indexSpaceStart;
+
+    int5 ifmCoords, lowRangeCoords = {0, 0, 0, 0, 0};
+    int5 zeroCoords = {0};
 
     // DEPTH
     const int depthStep = VECTOR_SIZE;
@@ -66,78 +66,120 @@ void main(tensor grad, tensor input, tensor output)
     const int fifthDimStart = indexSpaceStart[fifthDim];
     const int fifthDimEnd = indexSpaceEnd[fifthDim];
 
-    // bool256 pred0, pred1, pred2, pred3;
-    VECTOR threshold_v = 0.f;
-    VECTOR x0, x1, x2, x3;
-    VECTOR outp0, outp1, outp2, outp3;
-    VECTOR grad0, grad1, grad2, grad3;
+    int scale_dim = 5;
+    int scale_count = 1;
 
-    int5 ifmCoords = { 0, widthStart, 0, 0, 0 };
-    int5 ifmCoords1 = { 0, widthStart, 0, 0, 0 };
-    int5 ofmCoords = { 0, widthStart, 0, 0, 0 };
+    ScaleType scale_type = SINGLE_SCALE;
+    for (int i = 0; i < scale_dim; i++)
+    {
+        scale_count *= get_dim_size(input_range, i);
+    }
 
-    #pragma loop_taken
+    if (scale_count > 1)
+    {
+        if (get_dim_size(input_range, 3) > 1)
+        {
+            scale_type = PER_WEIGHT_CHANNEL;
+        }
+        else if (get_dim_size(input_range, 2) > 1)
+        {
+            scale_type = PER_ACTIVATION_CHANNEL;
+        }
+    }
+
+#pragma loop_taken
     for (int d = depthStart; d < depthEnd; d += depthStep)
     {
-        ifmCoords[depth] = d;   ofmCoords[depth] = d;   ifmCoords1[depth] = d;
-        #pragma loop_taken
+        ifmCoords[depth] = d;
+
+#pragma loop_taken
         for (int f = fifthDimStart; f < fifthDimEnd; f += fifthDimStep)
         {
-            ifmCoords[fifthDim] = f;   ofmCoords[fifthDim] = f;   ifmCoords1[fifthDim] = f;
-            #pragma loop_taken
+            ifmCoords[fifthDim] = f;
+
+#pragma loop_taken
             for (int b = batchStart; b < batchEnd; b += batchStep)
             {
-                ifmCoords[batch] = b;   ofmCoords[batch] = b;   ifmCoords1[batch] = b;
-                #pragma loop_taken
+                ifmCoords[batch] = b;
+                if (scale_type == PER_WEIGHT_CHANNEL)
+                    lowRangeCoords[batch] = b;
+#pragma loop_taken
                 for (int h = heightStart; h < heightEnd; h += heightStep)
                 {
-                    ifmCoords[height] = h;   ofmCoords[height] = h; ifmCoords1[height] = h;
-
-                    #pragma loop_taken
-                    for (int w = widthStart; w < widthEnd; w += widthStep)
+                    ifmCoords[height] = h;
+                    if (scale_type == PER_ACTIVATION_CHANNEL)
+                        lowRangeCoords[height] = h;
+#pragma loop_taken
+#pragma unroll 4
+                    for (int w = widthStart; w < widthEnd; w += 1)
                     {
-                        x0 = v_ld_tnsr_i(ifmCoords1, input);    ifmCoords1[width] += 1;
-                        x1 = v_ld_tnsr_i(ifmCoords1, input);    ifmCoords1[width] += 1;
-                        x2 = v_ld_tnsr_i(ifmCoords1, input);    ifmCoords1[width] += 1;
-                        x3 = v_ld_tnsr_i(ifmCoords1, input);    ifmCoords1[width] += 1;
+                        ifmCoords[width] = w;
 
-                        grad0 = v_ld_tnsr_i(ifmCoords, grad);  ifmCoords[width] += 1;
-                        grad1 = v_ld_tnsr_i(ifmCoords, grad);  ifmCoords[width] += 1;
-                        grad2 = v_ld_tnsr_i(ifmCoords, grad);  ifmCoords[width] += 1;
-                        grad3 = v_ld_tnsr_i(ifmCoords, grad);  ifmCoords[width] += 1;
+                        float64 input_val = v_f32_ld_tnsr_b(ifmCoords, input);
+                        float64 input_low_val = s_f32_ld_g((__global__ float *)gen_addr(lowRangeCoords, input_low));
+                        float64 input_range_val = s_f32_ld_g((__global__ float *)gen_addr(lowRangeCoords, input_range));
 
-                        outp0 = v_sel_grt_v_s_v_v(x0, threshold_v, grad0, 0);
-                        outp1 = v_sel_grt_v_s_v_v(x1, threshold_v, grad1, 0);
-                        outp2 = v_sel_grt_v_s_v_v(x2, threshold_v, grad2, 0);
-                        outp3 = v_sel_grt_v_s_v_v(x3, threshold_v, grad3, 0);
-#if defined(USE_RELU6)
-                        outp0 = v_sel_less_v_s_v_v_b(x0, (SCALAR)6.0, outp0, 0, outp0, 1, 0);
-                        outp1 = v_sel_less_v_s_v_v_b(x1, (SCALAR)6.0, outp1, 0, outp1, 1, 0);
-                        outp2 = v_sel_less_v_s_v_v_b(x2, (SCALAR)6.0, outp2, 0, outp2, 1, 0);
-                        outp3 = v_sel_less_v_s_v_v_b(x3, (SCALAR)6.0, outp3, 0, outp3, 1, 0);
-#else
-                        outp0 = v_sel_less_v_s_v_v_b(x0, (SCALAR)6.0, outp0, 0, outp0, 0, 0);
-                        outp1 = v_sel_less_v_s_v_v_b(x1, (SCALAR)6.0, outp1, 0, outp1, 0, 0);
-                        outp2 = v_sel_less_v_s_v_v_b(x2, (SCALAR)6.0, outp2, 0, outp2, 0, 0);
-                        outp3 = v_sel_less_v_s_v_v_b(x3, (SCALAR)6.0, outp3, 0, outp3, 0, 0);
-#endif
+                        float64 scale = (levels - 1) / input_range_val;
+                        float64 output_val = v_f32_max_b(v_f32_min_b(input_val, input_low_val + input_range_val), input_low_val);
+                        float64 zero_point = v_f32_nearbyint_b(-input_low_val * scale);
 
-                        //return NAN if grad == NAN, checking it by comparing grad greater than INF
-                        outp0 = (VECTOR)v_sel_grt_b(grad0, outp0);
-                        outp1 = (VECTOR)v_sel_grt_b(grad1, outp1);
-                        outp2 = (VECTOR)v_sel_grt_b(grad2, outp2);
-                        outp3 = (VECTOR)v_sel_grt_b(grad3, outp3);
+                        output_val -= input_low_val;
+                        output_val *= scale;
+                        output_val -= zero_point;
 
-                        st_tnsr_i_v(ofmCoords, output, outp0);    ofmCoords[width] += 1;
-                        st_tnsr_i_v(ofmCoords, output, outp1);    ofmCoords[width] += 1;
-                        st_tnsr_i_v(ofmCoords, output, outp2);    ofmCoords[width] += 1;
-                        st_tnsr_i_v(ofmCoords, output, outp3);    ofmCoords[width] += 1;
+                        output_val = v_f32_nearbyint_b(output_val + 0.5f, SW_RD);
+                        // output_val = v_f32_nearbyint_b(output_val);
+                        output_val = output_val / scale;
 
+                        float64 grad_output_val = v_f32_ld_tnsr_b(ifmCoords, grad_output);
+                        float64 range_sign = (input_range_val >= 0.0f) ? 1.0f : 0.0f;
+
+                        float64 mask_hi = (input_val > (input_low_val + input_range_val)) ? 1.0f : 0.0f;
+                        float64 mask_lo = (input_val < input_low_val) ? 1.0f : 0.0f;
+                        float64 mask_in = 1 - mask_hi - mask_lo;
+
+                        float64 grad_input_val = grad_output_val * mask_in;
+                        v_f32_st_tnsr(ifmCoords, grad_input, grad_input_val);
+
+                        float64 grad_low_val = grad_output_val * (mask_hi + mask_lo);
+                        grad_input_low_l_acc += v_f32_reduce_add(grad_low_val);
+
+                        float64 err = (output_val - input_val) * v_reciprocal_f32(input_range_val * range_sign);
+                        float64 grad_range_val = grad_output_val * (err * mask_in + range_sign * ((float)level_low / level_high) * mask_lo + mask_hi);
+                        grad_input_range_l_acc += v_f32_reduce_add(grad_range_val);
                     }
-                    ifmCoords[width] = widthStart;  ofmCoords[width] = widthStart;
-                    ifmCoords1[width] = widthStart;
+                    if (scale_type == PER_ACTIVATION_CHANNEL)
+                    {
+                        float64 grad_input_low_g_acc = v_f32_ld_tnsr_b(lowRangeCoords, grad_input_low);
+                        grad_input_low_g_acc += grad_input_low_l_acc;
+                        v_f32_st_tnsr(lowRangeCoords, grad_input_low, grad_input_low_g_acc);
+
+                        float64 grad_input_range_g_acc = v_f32_ld_tnsr_b(lowRangeCoords, grad_input_range);
+                        grad_input_range_g_acc += grad_input_range_l_acc;
+                        v_f32_st_tnsr(lowRangeCoords, grad_input_range, grad_input_range_g_acc);
+                    }
+                }
+                if (scale_type == PER_WEIGHT_CHANNEL)
+                {
+                    float64 grad_input_low_g_acc = v_f32_ld_tnsr_b(lowRangeCoords, grad_input_low);
+                    grad_input_low_g_acc += grad_input_low_l_acc;
+                    v_f32_st_tnsr(lowRangeCoords, grad_input_low, grad_input_low_g_acc);
+
+                    float64 grad_input_range_g_acc = v_f32_ld_tnsr_b(lowRangeCoords, grad_input_range);
+                    grad_input_range_g_acc += grad_input_range_l_acc;
+                    v_f32_st_tnsr(lowRangeCoords, grad_input_range, grad_input_range_g_acc);
                 }
             }
         }
+    }
+    if (scale_type == SINGLE_SCALE)
+    {
+        float64 grad_input_low_g_acc = v_f32_ld_tnsr_b(zeroCoords, grad_input_low);
+        grad_input_low_g_acc += grad_input_low_l_acc;
+        v_f32_st_tnsr(zeroCoords, grad_input_low, grad_input_low_g_acc);
+
+        float64 grad_input_range_g_acc = v_f32_ld_tnsr_b(zeroCoords, grad_input_range);
+        grad_input_range_g_acc += grad_input_range_l_acc;
+        v_f32_st_tnsr(zeroCoords, grad_input_range, grad_input_range_g_acc);
     }
 }

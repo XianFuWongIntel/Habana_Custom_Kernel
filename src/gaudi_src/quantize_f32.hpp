@@ -41,6 +41,8 @@ public:
     struct QuantizeParam
     {
         int levels;
+        int level_low;
+        int level_high;
     };
 
 private:

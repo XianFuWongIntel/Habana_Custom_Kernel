@@ -43,28 +43,35 @@ gcapi::GlueCodeReturn_t QuantizeF32::GetGcDefinitions(
     /*************************************************************************************
      *   Stage I - validate input
      **************************************************************************************/
-    // validate correct amount of input tensors
     if (m_mode == fwd)
     {
+        // validate correct amount of input tensors
         if (in_defs->inputTensorNr != 3)
         {
             in_defs->inputTensorNr = 1;
             return gcapi::GLUE_INCOMPATIBLE_INPUT_COUNT;
         }
+        // validate correct amount of output tensors
+        if (in_defs->outputTensorNr != 1)
+        {
+            in_defs->outputTensorNr = 1;
+            return gcapi::GLUE_INCOMPATIBLE_OUTPUT_COUNT;
+        }
     }
     else
     {
-        if (in_defs->inputTensorNr != 2)
+        // validate correct amount of input tensors
+        if (in_defs->inputTensorNr != 4)
         {
-            in_defs->inputTensorNr = 2;
+            in_defs->inputTensorNr = 1;
             return gcapi::GLUE_INCOMPATIBLE_INPUT_COUNT;
         }
-    }
-    // validate correct amount of output tensors
-    if (in_defs->outputTensorNr != 1)
-    {
-        in_defs->outputTensorNr = 1;
-        return gcapi::GLUE_INCOMPATIBLE_OUTPUT_COUNT;
+        // validate correct amount of output tensors
+        if (in_defs->outputTensorNr != 3)
+        {
+            in_defs->outputTensorNr = 1;
+            return gcapi::GLUE_INCOMPATIBLE_OUTPUT_COUNT;
+        }
     }
 
     // validate input and output data type
@@ -192,6 +199,33 @@ gcapi::GlueCodeReturn_t QuantizeF32::GetGcDefinitions(
     out_defs->outputTensorAccessPattern[0].dim[1].start_b = 0;
     out_defs->outputTensorAccessPattern[0].dim[1].end_b = c_unrollCount - 1;
 
+    if (m_mode == bwd)
+    {
+        out_defs->outputTensorAccessPattern[1].dim[0].dim = 0;
+        out_defs->outputTensorAccessPattern[1].dim[0].start_a = elementsInVec;
+        out_defs->outputTensorAccessPattern[1].dim[0].end_a = elementsInVec;
+        out_defs->outputTensorAccessPattern[1].dim[0].start_b = 0;
+        out_defs->outputTensorAccessPattern[1].dim[0].end_b = elementsInVec - 1;
+
+        out_defs->outputTensorAccessPattern[1].dim[1].dim = 1;
+        out_defs->outputTensorAccessPattern[1].dim[1].start_a = c_unrollCount;
+        out_defs->outputTensorAccessPattern[1].dim[1].end_a = c_unrollCount;
+        out_defs->outputTensorAccessPattern[1].dim[1].start_b = 0;
+        out_defs->outputTensorAccessPattern[1].dim[1].end_b = c_unrollCount - 1;
+
+        out_defs->outputTensorAccessPattern[2].dim[0].dim = 0;
+        out_defs->outputTensorAccessPattern[2].dim[0].start_a = elementsInVec;
+        out_defs->outputTensorAccessPattern[2].dim[0].end_a = elementsInVec;
+        out_defs->outputTensorAccessPattern[2].dim[0].start_b = 0;
+        out_defs->outputTensorAccessPattern[2].dim[0].end_b = elementsInVec - 1;
+
+        out_defs->outputTensorAccessPattern[2].dim[1].dim = 1;
+        out_defs->outputTensorAccessPattern[2].dim[1].start_a = c_unrollCount;
+        out_defs->outputTensorAccessPattern[2].dim[1].end_a = c_unrollCount;
+        out_defs->outputTensorAccessPattern[2].dim[1].start_b = 0;
+        out_defs->outputTensorAccessPattern[2].dim[1].end_b = c_unrollCount - 1;
+    }
+
     // f_start f(i) = 1*i + 0;
     // f_end   f(i) = 1*i + 0;
     // Resource 0 (OFM) dim 1-4
@@ -202,6 +236,21 @@ gcapi::GlueCodeReturn_t QuantizeF32::GetGcDefinitions(
         out_defs->outputTensorAccessPattern[0].dim[dims].end_a = 1;
         out_defs->outputTensorAccessPattern[0].dim[dims].start_b = 0;
         out_defs->outputTensorAccessPattern[0].dim[dims].end_b = 1 - 1;
+
+        if (m_mode == bwd)
+        {
+            out_defs->outputTensorAccessPattern[1].dim[dims].dim = dims;
+            out_defs->outputTensorAccessPattern[1].dim[dims].start_a = 1;
+            out_defs->outputTensorAccessPattern[1].dim[dims].end_a = 1;
+            out_defs->outputTensorAccessPattern[1].dim[dims].start_b = 0;
+            out_defs->outputTensorAccessPattern[1].dim[dims].end_b = 1 - 1;
+
+            out_defs->outputTensorAccessPattern[2].dim[dims].dim = dims;
+            out_defs->outputTensorAccessPattern[2].dim[dims].start_a = 1;
+            out_defs->outputTensorAccessPattern[2].dim[dims].end_a = 1;
+            out_defs->outputTensorAccessPattern[2].dim[dims].start_b = 0;
+            out_defs->outputTensorAccessPattern[2].dim[dims].end_b = 1 - 1;
+        }
     }
 
     /*************************************************************************************
