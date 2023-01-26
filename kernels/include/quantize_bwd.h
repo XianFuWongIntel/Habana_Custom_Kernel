@@ -127,8 +127,7 @@ void main(tensor grad_output, tensor input, tensor input_low, tensor input_range
                         output_val *= scale;
                         output_val -= zero_point;
 
-                        output_val = v_f32_nearbyint_b(output_val + 0.5f, SW_RD);
-                        // output_val = v_f32_nearbyint_b(output_val);
+                        output_val = v_f32_nearbyint_b(output_val);
                         output_val = output_val / scale;
 
                         float64 grad_output_val = v_f32_ld_tnsr_b(ifmCoords, grad_output);
