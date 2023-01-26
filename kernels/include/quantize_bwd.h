@@ -24,6 +24,21 @@ typedef enum _ScaleType
     PER_ACTIVATION_CHANNEL
 } ScaleType;
 
+float64 v_f32_custom_RHAZ(float64 input)
+{
+    int64 i32_input = v_convert_f32_to_i32_b(input, SW_RZ);
+    float64 f32_i32_diff = input - v_convert_i32_to_f32_b(i32_input);
+
+    bool256 neg_pred = from_bool64(v_f32_cmp_less_b(f32_i32_diff, 0.0, 0, to_bool64((bool256){0}), 1, 0));
+    bool256 less_than_half_pred = from_bool64(v_f32_cmp_less_b(v_f32_abs_b(f32_i32_diff), 0.5, 0, to_bool64(neg_pred), 1, 0));
+    bool256 round_down_pred = v_i1_xor_b(neg_pred, less_than_half_pred);
+
+    input = v_f32_nearbyint_vb(input, SW_RU, input, to_bool64(~round_down_pred), 0);
+    input = v_f32_nearbyint_vb(input, SW_RD, input, to_bool64(round_down_pred), 0);
+
+    return input;
+}
+
 void main(tensor grad_output, tensor input, tensor input_low, tensor input_range, tensor grad_input, tensor grad_input_low, tensor grad_input_range, int levels, int level_low, int level_high)
 {
     const int depth = 0;
@@ -121,13 +136,16 @@ void main(tensor grad_output, tensor input, tensor input_low, tensor input_range
 
                         float64 scale = (levels - 1) / input_range_val;
                         float64 output_val = v_f32_max_b(v_f32_min_b(input_val, input_low_val + input_range_val), input_low_val);
-                        float64 zero_point = v_f32_nearbyint_b(-input_low_val * scale);
+                        // float64 zero_point = v_f32_nearbyint_b(-input_low_val * scale);
+                        float64 zero_point = v_f32_custom_RHAZ(-input_low_val * scale);
 
                         output_val -= input_low_val;
                         output_val *= scale;
                         output_val -= zero_point;
 
-                        output_val = v_f32_nearbyint_b(output_val);
+                        // output_val = v_f32_nearbyint_b(output_val);
+                        output_val = v_f32_custom_RHAZ(output_val);
+
                         output_val = output_val / scale;
 
                         float64 grad_output_val = v_f32_ld_tnsr_b(ifmCoords, grad_output);
