@@ -30,6 +30,7 @@ NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVE
 #include "float16.h"
 #include "tpc_test_core_types.h"
 #include "gc_interface.h"
+#include <torch/torch.h>
 
 using namespace tpc_tests;
 
@@ -266,6 +267,14 @@ public:
         for ( int i = 0; i < m_element_count; i++ )
         {
             m_pdata[i] = (T)((T)rangemin + (T)rand() / ((T)RAND_MAX / ((T)rangemax - rangemin + (T)1) + (T)1));
+        }
+    }
+
+    void loadData(const at::Tensor &tensor)
+    {
+        for (int i = 0 ; i < m_element_count; i++)
+        {
+            m_pdata[i] = tensor.data_ptr<float>()[i];
         }
     }
 

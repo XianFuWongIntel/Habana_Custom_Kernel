@@ -18,6 +18,9 @@ include(ExternalProject)
 #required for 'ExternalProject_Add' command
 set(TEST_TARGET tpc_kernel_tests)
 
+set (CMAKE_CXX_STANDARD 14)
+find_package(Torch REQUIRED)
+
 include_directories(../src/gaudi_src                          # include headers in src
                     ../src/gaudi2_src
                     ../src
@@ -30,15 +33,19 @@ include_directories(../src/gaudi_src                          # include headers 
 # Select files to compile
 file(GLOB TESTS_FILES *.cpp gaudi_test/*.cpp gaudi2_test/*.cpp)
 
-if(NOT DEFINED TEST_NUM)
-    set(TEST_NUM 1)
-endif(NOT DEFINED TEST_NUM)
+if(NOT DEFINED CONFIG_NUM)
+    set(CONFIG_NUM 1)
+endif(NOT DEFINED CONFIG_NUM)
+
+if(NOT DEFINED LAYER_NUM)
+    set(LAYER_NUM 1)
+endif(NOT DEFINED LAYER_NUM)
 
 if(NOT DEFINED IS_WEIGHT)
     set(IS_WEIGHT 0)
 endif(NOT DEFINED IS_WEIGHT)
 
-add_definitions(-DTEST_BIN=${TEST_NUM} -DIS_WEIGHT=${IS_WEIGHT})
+add_definitions(-DCONFIG_NUM=${CONFIG_NUM} -DLAYER_NUM=${LAYER_NUM} -DIS_WEIGHT=${IS_WEIGHT})
 
 # Create test executable
 add_executable(${TEST_TARGET} ${TESTS_FILES})
@@ -51,4 +58,5 @@ target_link_libraries(
     ${TPC_TEST_CORE_LIBRARY} 
     ${TPCSIM_SHARED_LIBRARY}
     ${TPC_ELF_READER_LIBRARY}
+    ${TORCH_LIBRARIES}
     custom_tpc_perf_lib)

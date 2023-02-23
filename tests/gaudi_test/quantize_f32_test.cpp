@@ -15,385 +15,299 @@ NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVE
 ********************************************************************/
 
 #include "quantize_f32_test.hpp"
+#include <torch/torch.h>
+#include <regex>
 
 #define DEBUG_PRINTF 0
-#define LOAD_FROM_JSON 1
-
-#if LOAD_FROM_JSON
-#include "json.hpp"
-#include <fstream>
-
 #define ROOT_DIR "../test_binaries/"
-#define QUANT_IO 1
-#define RN18_4BIT_WQ_SYM_AQ_ASYM_PER_CHANNEL 2
-#define RN18_8BIT_WQ_ASYM_AQ_ASYM_PER_TENSOR 3
-#define RN18_8BIT_WQ_ASYM_AQ_SYM_PER_CHANNEL 4
-#define RN18_8BIT_WQ_SYM_AQ_ASYM_PER_CHANNEL 5
-#define RN18_8BIT_WQ_SYM_AQ_ASYM_PER_TENSOR 6
-#define ACT_QIO_RN18_8BIT_WQ_ASYM_AQ_SYM_PER_CHANNEL 7
-#define WT_QIO_RN18_8BIT_WQ_ASYM_AQ_SYM_PER_CHANNEL 8
+#define DEFAULT_THRESHOLD 1e-06
 
-using json = nlohmann::json;
-#endif
-
-void QuantizeF32Test::quantize_f32_reference_implementation(
-    const float_5DTensor &input,
-    const float_5DTensor &input_low,
-    const float_5DTensor &input_range,
-    const int levels,
-    float_5DTensor &output, Gaudi_Kernel_Name_e mode)
+std::vector<char> get_the_bytes(std::string filename)
 {
-    int coords[5] = {0};
-    const float_5DTensor scale;
+    std::ifstream input(filename, std::ios::binary);
+    std::vector<char> bytes(
+        (std::istreambuf_iterator<char>(input)),
+        (std::istreambuf_iterator<char>()));
 
-    for (unsigned f = 0; f < input.Size(4); f += 1)
-    {
-        coords[4] = f;
-        for (unsigned b = 0; b < input.Size(3); b += 1)
-        {
-            coords[3] = b;
-            for (unsigned h = 0; h < input.Size(2); h += 1)
-            {
-                coords[2] = h;
-                for (unsigned w = 0; w < input.Size(1); w += 1)
-                {
-                    coords[1] = w;
-                    for (unsigned d = 0; d < input.Size(0); d += 1)
-                    {
-                        coords[0] = d;
-                        if (mode == GAUDI_KERNEL_QUANTIZE_FWD_F32)
-                        {
-                            float input_val = input.ElementAt(coords);
-                            float input_low_val = input_low.ElementAt(new int[5]{(input_low.Size(0) == 1) ? 0 : (int)d, 0, 0, 0, 0});
-                            float input_range_val = input_range.ElementAt(new int[5]{(input_range.Size(0) == 1) ? 0 : (int)d, 0, 0, 0, 0});
-
-                            float scale = (levels - 1) / input_range_val;
-                            float min_clip = input_low_val;
-                            float max_clip = input_low_val + input_range_val;
-                            float clipped = (input_val < min_clip) ? min_clip : (input_val > max_clip) ? max_clip
-                                                                                                       : input_val;
-
-                            clipped -= input_low_val;
-                            clipped *= scale;
-                            clipped = std::round(clipped);
-                            clipped = clipped / scale;
-                            clipped += input_low_val;
-
-                            output.SetElement(coords, clipped);
-                        }
-                        else if (mode == GAUDI_KERNEL_QUANTIZE_BWD_F32)
-                        {
-                            // float g = gradin.ElementAt(coords);
-                            // float x = input.ElementAt(coords);
-                            // float y = (x < 0.0f) ? 0 : x;
-                            // x = (y > 0.0f) ? 1 : 0;
-                            // x = x * g;
-                            // output.SetElement(coords, x);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    input.close();
+    return bytes;
 }
 
-void calcScale(float_5DTensor &input, float_5DTensor &scale, const int scale_idx = 0)
+std::vector<size_t> getMemDims(const int nDims, c10::ArrayRef<long int> dims)
 {
-    auto inData = input.Data();
-    auto nElem = input.ElementCount();
-
-    const auto minVal = inData[std::min_element(inData, inData + nElem) - inData];
-    const auto maxVal = inData[std::max_element(inData, inData + nElem) - inData];
-    const auto meanVal = std::accumulate(inData, inData + nElem, 0) / float(nElem);
-
-    scale.Data()[scale_idx] = (std::min(std::abs(minVal), std::abs(maxVal)) - meanVal) / float(4);
-    scale.Data()[scale_idx] = std::abs(scale.Data()[scale_idx]) + 1e-6;
-
-#if DEBUG_PRINTF
-    std::cout << "Elems\t: " << input.ElementCount() << std::endl;
-    std::cout << "Min\t: " << minVal << std::endl;
-    std::cout << "Max\t: " << maxVal << std::endl;
-    std::cout << "Mean\t: " << meanVal << std::endl;
-#endif
-}
-
-void setInputLowAndRange(float_5DTensor &scale, const int level_low, const int level_high, float_5DTensor &input_low, float_5DTensor &input_range)
-{
-    for (int element = 0; element < input_low.ElementCount(); element++)
+    std::vector<size_t> mDims(5, 1);
+    for (int i = 0; i < nDims; i++)
     {
-        input_low.Data()[element] = scale.Data()[element] * (level_low / (float)level_high);
-        input_range.Data()[element] = scale.Data()[element] - input_low.Data()[element];
+        mDims[i] = dims[nDims - 1 - i];
     }
+    return mDims;
 }
 
 int QuantizeF32Test::runTest(Gaudi_Kernel_Name_e NameofKernel)
 {
-#if LOAD_FROM_JSON
-    std::string fn(ROOT_DIR);
-    json test_bin;
-    bool is_single_scale;
-    bool is_weight = (IS_WEIGHT) ? true : false;
+    std::string fn;
+    std::string config;
+// Config
+#if CONFIG_NUM == 1
+    config = "qio_rn18-4bit-wq-sym-aq-asym-per-channel";
+#elif CONFIG_NUM == 2
+    config = "qio_rn18-8bit-wq-asym-aq-asym-per-tensor";
+#elif CONFIG_NUM == 3
+    config = "qio_rn18-8bit-wq-asym-aq-sym-per-channel";
+#elif CONFIG_NUM == 4
+    config = "qio_rn18-8bit-wq-sym-aq-asym-per-channel";
+#elif CONFIG_NUM == 5
+    config = "qio_rn18-8bit-wq-sym-aq-sym-per-tensor";
+#endif
+    fn.append(config + "/");
+// Weight binaries
+#if IS_WEIGHT
+    fn.append("wt/");
+#if LAYER_NUM == 1
+    fn.append("ResNet/NNCFConv2d[conv1]/conv2d_0|WEIGHT/");
+#elif LAYER_NUM == 2
+    fn.append("ResNet/Sequential[layer1]/BasicBlock[0]/NNCFConv2d[conv1]/conv2d_0|WEIGHT/");
+#elif LAYER_NUM == 3
+    fn.append("ResNet/Sequential[layer1]/BasicBlock[0]/NNCFConv2d[conv2]/conv2d_0|WEIGHT/");
+#elif LAYER_NUM == 4
+    fn.append("ResNet/Sequential[layer1]/BasicBlock[1]/NNCFConv2d[conv1]/conv2d_0|WEIGHT/");
+#elif LAYER_NUM == 5
+    fn.append("ResNet/Sequential[layer1]/BasicBlock[1]/NNCFConv2d[conv2]/conv2d_0|WEIGHT/");
+#elif LAYER_NUM == 6
+    fn.append("ResNet/Sequential[layer2]/BasicBlock[0]/NNCFConv2d[conv1]/conv2d_0|WEIGHT/");
+#elif LAYER_NUM == 7
+    fn.append("ResNet/Sequential[layer2]/BasicBlock[0]/NNCFConv2d[conv2]/conv2d_0|WEIGHT/");
+#elif LAYER_NUM == 8
+    fn.append("ResNet/Sequential[layer2]/BasicBlock[0]/Sequential[downsample]/NNCFConv2d[0]/conv2d_0|WEIGHT/");
+#elif LAYER_NUM == 9
+    fn.append("ResNet/Sequential[layer2]/BasicBlock[1]/NNCFConv2d[conv1]/conv2d_0|WEIGHT/");
+#elif LAYER_NUM == 10
+    fn.append("ResNet/Sequential[layer2]/BasicBlock[1]/NNCFConv2d[conv2]/conv2d_0|WEIGHT/");
+#elif LAYER_NUM == 11
+    fn.append("ResNet/Sequential[layer3]/BasicBlock[0]/NNCFConv2d[conv1]/conv2d_0|WEIGHT/");
+#elif LAYER_NUM == 12
+    fn.append("ResNet/Sequential[layer3]/BasicBlock[0]/NNCFConv2d[conv2]/conv2d_0|WEIGHT/");
+#elif LAYER_NUM == 13
+    fn.append("ResNet/Sequential[layer3]/BasicBlock[0]/Sequential[downsample]/NNCFConv2d[0]/conv2d_0|WEIGHT/");
+#elif LAYER_NUM == 14
+    fn.append("ResNet/Sequential[layer3]/BasicBlock[1]/NNCFConv2d[conv1]/conv2d_0|WEIGHT/");
+#elif LAYER_NUM == 15
+    fn.append("ResNet/Sequential[layer3]/BasicBlock[1]/NNCFConv2d[conv2]/conv2d_0|WEIGHT/");
+#elif LAYER_NUM == 16
+    fn.append("ResNet/Sequential[layer4]/BasicBlock[0]/NNCFConv2d[conv1]/conv2d_0|WEIGHT/");
+#elif LAYER_NUM == 17
+    fn.append("ResNet/Sequential[layer4]/BasicBlock[0]/NNCFConv2d[conv2]/conv2d_0|WEIGHT/");
+#elif LAYER_NUM == 18
+    fn.append("ResNet/Sequential[layer4]/BasicBlock[0]/Sequential[downsample]/NNCFConv2d[0]/conv2d_0|WEIGHT/");
+#elif LAYER_NUM == 19
+    fn.append("ResNet/Sequential[layer4]/BasicBlock[1]/NNCFConv2d[conv1]/conv2d_0|WEIGHT/");
+#elif LAYER_NUM == 20
+    fn.append("ResNet/Sequential[layer4]/BasicBlock[1]/NNCFConv2d[conv2]/conv2d_0|WEIGHT/");
+#elif LAYER_NUM == 21
+    fn.append("ResNet/NNCFLinear[fc]/linear_0|WEIGHT/");
+#endif
+// Activation binaries
+#else
+    fn.append("act/");
+#if LAYER_NUM == 1
+    fn.append("ResNet/Sequential[layer1]/BasicBlock[0]/ReLU[relu]/relu__0|OUTPUT/");
+#elif LAYER_NUM == 2
+    fn.append("ResNet/Sequential[layer1]/BasicBlock[0]/NNCFBatchNorm2d[bn2]/batch_norm_0|OUTPUT/");
+#elif LAYER_NUM == 3
+    fn.append("ResNet/Sequential[layer1]/BasicBlock[1]/ReLU[relu]/relu__0|OUTPUT/");
+#elif LAYER_NUM == 4
+    fn.append("ResNet/Sequential[layer1]/BasicBlock[1]/NNCFBatchNorm2d[bn2]/batch_norm_0|OUTPUT/");
+#elif LAYER_NUM == 5
+    fn.append("ResNet/Sequential[layer2]/BasicBlock[0]/ReLU[relu]/relu__0|OUTPUT/");
+#elif LAYER_NUM == 6
+    fn.append("ResNet/Sequential[layer2]/BasicBlock[0]/NNCFBatchNorm2d[bn2]/batch_norm_0|OUTPUT/");
+#elif LAYER_NUM == 7
+    fn.append("ResNet/Sequential[layer2]/BasicBlock[0]/Sequential[downsample]/NNCFBatchNorm2d[1]/batch_norm_0|OUTPUT/");
+#elif LAYER_NUM == 8
+    fn.append("ResNet/Sequential[layer2]/BasicBlock[1]/ReLU[relu]/relu__0|OUTPUT/");
+#elif LAYER_NUM == 9
+    fn.append("ResNet/Sequential[layer2]/BasicBlock[1]/NNCFBatchNorm2d[bn2]/batch_norm_0|OUTPUT/");
+#elif LAYER_NUM == 10
+    fn.append("ResNet/Sequential[layer3]/BasicBlock[0]/ReLU[relu]/relu__0|OUTPUT/");
+#elif LAYER_NUM == 11
+    fn.append("ResNet/Sequential[layer3]/BasicBlock[0]/NNCFBatchNorm2d[bn2]/batch_norm_0|OUTPUT/");
+#elif LAYER_NUM == 12
+    fn.append("ResNet/Sequential[layer3]/BasicBlock[0]/Sequential[downsample]/NNCFBatchNorm2d[1]/batch_norm_0|OUTPUT/");
+#elif LAYER_NUM == 13
+    fn.append("ResNet/Sequential[layer3]/BasicBlock[1]/ReLU[relu]/relu__0|OUTPUT/");
+#elif LAYER_NUM == 14
+    fn.append("ResNet/Sequential[layer3]/BasicBlock[1]/NNCFBatchNorm2d[bn2]/batch_norm_0|OUTPUT/");
+#elif LAYER_NUM == 15
+    fn.append("ResNet/Sequential[layer4]/BasicBlock[0]/ReLU[relu]/relu__0|OUTPUT/");
+#elif LAYER_NUM == 16
+    fn.append("ResNet/Sequential[layer4]/BasicBlock[0]/NNCFBatchNorm2d[bn2]/batch_norm_0|OUTPUT/");
+#elif LAYER_NUM == 17
+    fn.append("ResNet/Sequential[layer4]/BasicBlock[0]/Sequential[downsample]/NNCFBatchNorm2d[1]/batch_norm_0|OUTPUT/");
+#elif LAYER_NUM == 18
+    fn.append("ResNet/Sequential[layer4]/BasicBlock[1]/ReLU[relu]/relu__0|OUTPUT/");
+#elif LAYER_NUM == 19
+    fn.append("ResNet/Sequential[layer4]/BasicBlock[1]/NNCFBatchNorm2d[bn2]/batch_norm_0|OUTPUT/");
+#elif LAYER_NUM == 20
+    fn.append("ResNet/Sequential[layer4]/BasicBlock[1]/ReLU[relu]/relu__1|OUTPUT/");
+#elif LAYER_NUM == 21
+    fn.append("ResNet/AdaptiveAvgPool2d[avgpool]/adaptive_avg_pool2d_0|OUTPUT/");
+#elif LAYER_NUM == 22
+    fn.append("ResNet/ReLU[relu]/relu__0|OUTPUT/");
+#elif LAYER_NUM == 23
+    fn.append("ResNet/Sequential[layer1]/BasicBlock[0]/ReLU[relu]/relu__1|OUTPUT/");
+#elif LAYER_NUM == 24
+    fn.append("ResNet/Sequential[layer1]/BasicBlock[1]/ReLU[relu]/relu__1|OUTPUT/");
+#elif LAYER_NUM == 25
+    fn.append("ResNet/Sequential[layer2]/BasicBlock[0]/ReLU[relu]/relu__1|OUTPUT/");
+#elif LAYER_NUM == 26
+    fn.append("ResNet/Sequential[layer2]/BasicBlock[1]/ReLU[relu]/relu__1|OUTPUT/");
+#elif LAYER_NUM == 27
+    fn.append("ResNet/Sequential[layer3]/BasicBlock[0]/ReLU[relu]/relu__1|OUTPUT/");
+#elif LAYER_NUM == 28
+    fn.append("ResNet/Sequential[layer3]/BasicBlock[1]/ReLU[relu]/relu__1|OUTPUT/");
+#elif LAYER_NUM == 29
+    fn.append("ResNet/Sequential[layer4]/BasicBlock[0]/ReLU[relu]/relu__1|OUTPUT/");
+#endif
+#endif
+    std::cout << "[config]/[wt|act]/[layer] :\n" << fn << std::endl;
 
-#if TEST_BIN == QUANT_IO
-    fn.append("quant_io.json");
-    std::ifstream test_file(fn, std::ifstream::binary);
-    test_file >> test_bin;
-#if IS_WEIGHT
-    is_single_scale = false;
-    auto test_content = test_bin["ResNet/NNCFConv2d[conv1]/conv2d_0|WEIGHT"]["Forward"];
-    std::vector<std::vector<std::vector<std::vector<float>>>> test_input_low = test_content["i"]["input_low"];
-    std::vector<std::vector<std::vector<std::vector<float>>>> test_input_range = test_content["i"]["input_range"];
-#else
-    is_single_scale = true;
-    auto test_content = test_bin["ResNet/Sequential[layer4]/BasicBlock[0]/ReLU[relu]/relu__1|OUTPUT"]["Forward"];
-    std::vector<float> test_input_low = test_content["i"]["input_low"];
-    std::vector<float> test_input_range = test_content["i"]["input_range"];
-#endif
-#elif TEST_BIN == RN18_4BIT_WQ_SYM_AQ_ASYM_PER_CHANNEL
-    fn.append("qio_rn18-4bit-wq-sym-aq-asym-per-channel.json");
-    std::ifstream test_file(fn, std::ifstream::binary);
-    test_file >> test_bin;
-    is_single_scale = false;
-#if IS_WEIGHT
-    auto test_content = test_bin["ResNet/NNCFConv2d[conv1]/conv2d_0|WEIGHT"]["Forward"];
-    std::vector<std::vector<std::vector<std::vector<float>>>> test_input_low = test_content["i"]["input_low"];
-    std::vector<std::vector<std::vector<std::vector<float>>>> test_input_range = test_content["i"]["input_range"];
-#else
-    auto test_content = test_bin["ResNet/Sequential[layer4]/BasicBlock[0]/ReLU[relu]/relu__1|OUTPUT"]["Forward"];
-    std::vector<std::vector<std::vector<std::vector<float>>>> test_input_low = test_content["i"]["input_low"];
-    std::vector<std::vector<std::vector<std::vector<float>>>> test_input_range = test_content["i"]["input_range"];
-#endif
-#elif TEST_BIN == RN18_8BIT_WQ_ASYM_AQ_ASYM_PER_TENSOR
-    fn.append("qio_rn18-8bit-wq-asym-aq-asym-per-tensor.json");
-    std::ifstream test_file(fn, std::ifstream::binary);
-    test_file >> test_bin;
-    is_single_scale = true;
-#if IS_WEIGHT
-    auto test_content = test_bin["ResNet/NNCFConv2d[conv1]/conv2d_0|WEIGHT"]["Forward"];
-    std::vector<float> test_input_low = test_content["i"]["input_low"];
-    std::vector<float> test_input_range = test_content["i"]["input_range"];
-#else
-    auto test_content = test_bin["ResNet/Sequential[layer4]/BasicBlock[0]/ReLU[relu]/relu__1|OUTPUT"]["Forward"];
-    std::vector<float> test_input_low = test_content["i"]["input_low"];
-    std::vector<float> test_input_range = test_content["i"]["input_range"];
-#endif
-#elif TEST_BIN == RN18_8BIT_WQ_ASYM_AQ_SYM_PER_CHANNEL
-    fn.append("qio_rn18-8bit-wq-asym-aq-sym-per-channel.json");
-    std::ifstream test_file(fn, std::ifstream::binary);
-    test_file >> test_bin;
-    is_single_scale = false;
-#if IS_WEIGHT
-    auto test_content = test_bin["ResNet/NNCFConv2d[conv1]/conv2d_0|WEIGHT"]["Forward"];
-    std::vector<std::vector<std::vector<std::vector<float>>>> test_input_low = test_content["i"]["input_low"];
-    std::vector<std::vector<std::vector<std::vector<float>>>> test_input_range = test_content["i"]["input_range"];
-#else
-    auto test_content = test_bin["ResNet/Sequential[layer4]/BasicBlock[0]/ReLU[relu]/relu__1|OUTPUT"]["Forward"];
-    std::vector<std::vector<std::vector<std::vector<float>>>> test_input_low = test_content["i"]["input_low"];
-    std::vector<std::vector<std::vector<std::vector<float>>>> test_input_range = test_content["i"]["input_range"];
-#endif
-#elif TEST_BIN == RN18_8BIT_WQ_SYM_AQ_ASYM_PER_CHANNEL
-    fn.append("qio_rn18-8bit-wq-sym-aq-asym-per-channel.json");
-    std::ifstream test_file(fn, std::ifstream::binary);
-    test_file >> test_bin;
-    is_single_scale = false;
-#if IS_WEIGHT
-    auto test_content = test_bin["ResNet/NNCFConv2d[conv1]/conv2d_0|WEIGHT"]["Forward"];
-    std::vector<std::vector<std::vector<std::vector<float>>>> test_input_low = test_content["i"]["input_low"];
-    std::vector<std::vector<std::vector<std::vector<float>>>> test_input_range = test_content["i"]["input_range"];
-#else
-    auto test_content = test_bin["ResNet/Sequential[layer4]/BasicBlock[0]/ReLU[relu]/relu__1|OUTPUT"]["Forward"];
-    std::vector<std::vector<std::vector<std::vector<float>>>> test_input_low = test_content["i"]["input_low"];
-    std::vector<std::vector<std::vector<std::vector<float>>>> test_input_range = test_content["i"]["input_range"];
-#endif
-#elif TEST_BIN == RN18_8BIT_WQ_SYM_AQ_ASYM_PER_TENSOR
-    fn.append("qio_rn18-8bit-wq-sym-aq-sym-per-tensor.json");
-    std::ifstream test_file(fn, std::ifstream::binary);
-    test_file >> test_bin;
-    is_single_scale = true;
-#if IS_WEIGHT
-    auto test_content = test_bin["ResNet/NNCFConv2d[conv1]/conv2d_0|WEIGHT"]["Forward"];
-    std::vector<float> test_input_low = test_content["i"]["input_low"];
-    std::vector<float> test_input_range = test_content["i"]["input_range"];
-#else
-    auto test_content = test_bin["ResNet/Sequential[layer4]/BasicBlock[0]/ReLU[relu]/relu__1|OUTPUT"]["Forward"];
-    std::vector<float> test_input_low = test_content["i"]["input_low"];
-    std::vector<float> test_input_range = test_content["i"]["input_range"];
-#endif
-#elif TEST_BIN == ACT_QIO_RN18_8BIT_WQ_ASYM_AQ_SYM_PER_CHANNEL
-    is_weight = false;
-    fn.append("act-qio_rn18-8bit-wq-asym-aq-sym-per-channel.json");
-    std::ifstream test_file(fn, std::ifstream::binary);
-    test_file >> test_bin;
-    is_single_scale = false;
-    auto test_content = test_bin["ResNet/Sequential[layer4]/BasicBlock[0]/ReLU[relu]/relu__1|OUTPUT"]["Forward"];
-    std::vector<std::vector<std::vector<std::vector<float>>>> test_input_low = test_content["i"]["input_low"];
-    std::vector<std::vector<std::vector<std::vector<float>>>> test_input_range = test_content["i"]["input_range"];
-#elif TEST_BIN == WT_QIO_RN18_8BIT_WQ_ASYM_AQ_SYM_PER_CHANNEL
-    is_weight = true;
-    fn.append("wt-qio_rn18-8bit-wq-asym-aq-sym-per-channel.json");
-    std::ifstream test_file(fn, std::ifstream::binary);
-    test_file >> test_bin;
-    is_single_scale = false;
-    auto test_content = test_bin["ResNet/NNCFConv2d[conv1]/conv2d_0|WEIGHT"]["Forward"];
-    std::vector<std::vector<std::vector<std::vector<float>>>> test_input_low = test_content["i"]["input_low"];
-    std::vector<std::vector<std::vector<std::vector<float>>>> test_input_range = test_content["i"]["input_range"];
-#else
-#error Invalid 'TEST_NUM', rerun cmake with '-DTEST_NUM=[1-8]'
-#endif
-    std::vector<std::vector<std::vector<std::vector<float>>>> test_input = test_content["i"]["input_"];
-    int test_levels = test_content["i"]["levels"].get<int>();
-    std::vector<std::vector<std::vector<std::vector<float>>>> test_output_ref = test_content["o"];
-
-    // Note: Treat input as NHWC, even thought it's supposed be to NCHW ...
-    // e.g.
-    // N = 64     N = 64
-    // C = 3      H = 3
-    // H = 7  --> W = 7
-    // W = 7      C = 7
-    const uint height = test_input[0].size();
-    const uint width = test_input[0][0].size();
-    const uint depth = test_input[0][0][0].size();
-    const uint batch = test_input.size();
-    const uint fifthdim = 1;
-    unsigned int scaleinitializer[] = {1, 1, 1, 1, 1};
-
-    if (!is_single_scale)
+    fn.insert(0, ROOT_DIR);
+    if (NameofKernel == GAUDI_KERNEL_QUANTIZE_FWD_F32)
     {
-        scaleinitializer[3] = (is_weight) ? batch : 1;
-        scaleinitializer[2] = (is_weight) ? 1 : height;
+        fn.append("Forward/");
     }
-#else
-    const uint height = 5;
-    const uint width = 4;
-    const uint depth = 3;
-    const uint batch = 2;
-    const uint fifthdim = 1;
-    const uint scale_depth = (is_single_scale) ? 1 : depth;
-    unsigned int scaleinitializer[] = {scale_depth, 1, 1, 1, 1};
-#endif
-    unsigned int fmInitializer[] = {depth, width, height, batch, fifthdim};
+    else
+    {
+        fn.append("Backward/");
+    }
 
     unsigned kernelCount;
     gcapi::GlueCodeReturn_t result;
     char **kernelNames = nullptr;
 
-    const int level_low = -128;
-    const int level_high = 127;
-
     QuantizeF32::QuantizeParam param;
-    param.levels = std::abs(level_low) + std::abs(level_high) + 1;
+
+    auto input_pt = torch::pickle_load(get_the_bytes(fn + "/i/input_.pt")).toTensor();
+    auto input_low_pt = torch::pickle_load(get_the_bytes(fn + "/i/input_low.pt")).toTensor();
+    auto input_range_pt = torch::pickle_load(get_the_bytes(fn + "/i/input_range.pt")).toTensor();
+    auto levels_pt = torch::pickle_load(get_the_bytes(fn + "/i/levels.pt")).toInt();
+
+    const auto inputNumDims = input_pt.sizes().size();
+    const auto inputMemDims = getMemDims(inputNumDims, input_pt.sizes());
+    const auto scaleNumDims = input_range_pt.sizes().size();
+    const auto scaleMemDims = getMemDims(scaleNumDims, input_range_pt.sizes());
+
+    unsigned int fmInitializer[] = {(uint)inputMemDims[0], (uint)inputMemDims[1], (uint)inputMemDims[2], (uint)inputMemDims[3], (uint)inputMemDims[4]};
+    unsigned int scaleinitializer[] = {(uint)scaleMemDims[0], (uint)scaleMemDims[1], (uint)scaleMemDims[2], (uint)scaleMemDims[3], (uint)scaleMemDims[4]};
 
     float_5DTensor input(fmInitializer);
-    input.InitRand(-10.0f, 10.0f);
     float_5DTensor input_low(scaleinitializer);
     float_5DTensor input_range(scaleinitializer);
     float_5DTensor scale(scaleinitializer);
 
-    if (is_single_scale)
-    {
-        // Calculate scale for 'single_scale' mode
-        calcScale(input, scale);
-        // Set 'input_low' and 'input_range' based on 'scale', 'level_low' and 'level_high'
-        setInputLowAndRange(scale, level_low, level_high, input_low, input_range);
-    }
-    else
-    {
-        unsigned int perChannelInputInitializer[] = {1, width, height, batch, fifthdim};
-        float_5DTensor perChannelInput(perChannelInputInitializer);
-        int coords[5], perChannelCoords[5] = {0};
-
-        for (unsigned d = 0; d < input.Size(0); d += 1)
-        {
-            coords[0] = d;
-            for (unsigned f = 0; f < input.Size(4); f += 1)
-            {
-                coords[4] = f;
-                perChannelCoords[4] = coords[4];
-                for (unsigned b = 0; b < input.Size(3); b += 1)
-                {
-                    coords[3] = b;
-                    perChannelCoords[3] = coords[3];
-                    for (unsigned h = 0; h < input.Size(2); h += 1)
-                    {
-                        coords[2] = h;
-                        perChannelCoords[2] = coords[2];
-                        for (unsigned w = 0; w < input.Size(1); w += 1)
-                        {
-                            coords[1] = w;
-                            perChannelCoords[1] = coords[1];
-                            perChannelInput.SetElement(perChannelCoords, input.ElementAt(coords));
-                        }
-                    }
-                }
-            }
-            calcScale(perChannelInput, scale, d);
-        }
-        setInputLowAndRange(scale, level_low, level_high, input_low, input_range);
-    }
-
+    // For forward only
     float_5DTensor output(fmInitializer);
     float_5DTensor output_ref(fmInitializer);
 
-#if LOAD_FROM_JSON
-    input.loadData(test_input);
-    input_low.loadData(test_input_low);
-    input_range.loadData(test_input_range);
-    param.levels = test_levels;
-#endif
-#if DEBUG_PRINTF
-    std::cout << "input" << std::endl;
-    for (uint i = 0; i < input.Size(0); i++)
-    {
-        input.Print(i);
-    }
-    std::cout << "\nscale" << std::endl;
-    for (uint i = 0; i < scale.Size(0); i++)
-    {
-        scale.Print(i);
-    }
-    std::cout << "\ninput_low" << std::endl;
-    for (uint i = 0; i < input_low.Size(0); i++)
-    {
-        input_low.Print(i);
-    }
-    std::cout << "\ninput_range" << std::endl;
-    for (uint i = 0; i < input_range.Size(0); i++)
-    {
-        input_range.Print(i);
-    }
-#endif
+    // For backward only
+    float_5DTensor grad_output(fmInitializer);
+
+    float_5DTensor grad_input(fmInitializer);
+    float_5DTensor grad_input_ref(fmInitializer);
+
+    float_5DTensor grad_input_low(scaleinitializer);
+    float_5DTensor grad_input_low_ref(scaleinitializer);
+
+    float_5DTensor grad_input_range(scaleinitializer);
+    float_5DTensor grad_input_range_ref(scaleinitializer);
+
+    input.loadData(input_pt);
+    input_low.loadData(input_low_pt);
+    input_range.loadData(input_range_pt);
+    param.levels = levels_pt;
+
+    bool is_sym = false;
+
+    // generate and load tensor descriptors
+    std::vector<TensorDesc> vec;
+
     std::cout << "input (" << input.Size(0) << "," << input.Size(1) << "," << input.Size(2) << "," << input.Size(3) << ")" << std::endl;
     std::cout << "input_low (" << input_low.Size(0) << "," << input_low.Size(1) << "," << input_low.Size(2) << "," << input_low.Size(3) << ")" << std::endl;
     std::cout << "input_range (" << input_range.Size(0) << "," << input_range.Size(1) << "," << input_range.Size(2) << "," << input_range.Size(3) << ")" << std::endl;
 
-    // generate input for query call
-    m_in_defs.deviceId = gcapi::DEVICE_ID_GAUDI;
-    m_in_defs.NodeParams = &param;
-
     if (NameofKernel == GAUDI_KERNEL_QUANTIZE_FWD_F32)
     {
-        // execute reference implementation of the kernel.
+        auto output_pt = torch::pickle_load(get_the_bytes(fn + "/o/output.pt")).toTensor();
+        output_ref.loadData(output_pt);
+
         m_in_defs.inputTensorNr = 3;
-#if LOAD_FROM_JSON
-        output_ref.loadData(test_output_ref);
-#else
-        quantize_f32_reference_implementation(input, input_low, input_range, param.levels, output_ref, NameofKernel);
-#endif
         LoadTensorToGcDescriptor(&(m_in_defs.inputTensors[0]), input);
         LoadTensorToGcDescriptor(&(m_in_defs.inputTensors[1]), input_low);
         LoadTensorToGcDescriptor(&(m_in_defs.inputTensors[2]), input_range);
+
+        m_in_defs.outputTensorNr = 1;
+        LoadTensorToGcDescriptor(&(m_in_defs.outputTensors[0]), output);
+
+        vec.push_back(input.GetTensorDescriptor());
+        vec.push_back(input_low.GetTensorDescriptor());
+        vec.push_back(input_range.GetTensorDescriptor());
+        vec.push_back(output.GetTensorDescriptor());
     }
     else
     {
-        // execute reference implementation of the kernel.
-        m_in_defs.inputTensorNr = 2;
-        quantize_f32_reference_implementation(input, input_low, input_range, param.levels, output_ref, NameofKernel);
-        LoadTensorToGcDescriptor(&(m_in_defs.inputTensors[0]), input);
+        auto grad_output_pt = torch::pickle_load(get_the_bytes(fn + "/i/grad_output.pt")).toTensor();
+        auto level_high_pt = torch::pickle_load(get_the_bytes(fn + "/i/level_high.pt")).toInt();
+        auto level_low_pt = torch::pickle_load(get_the_bytes(fn + "/i/level_low.pt")).toInt();
+
+        is_sym = (fn.substr(fn.find((IS_WEIGHT) ? "wq" : "aq"), 4)[3] == 's') ? true : false;
+
+        auto grad_input_pt = torch::pickle_load(get_the_bytes(fn + "/o/grad_input.pt")).toTensor();
+
+        grad_output.loadData(grad_output_pt);
+        param.level_low = level_low_pt;
+        param.level_high = level_high_pt;
+
+        grad_input_ref.loadData(grad_input_pt);
+
+        std::cout << "grad_output (" << grad_output.Size(0) << "," << grad_output.Size(1) << "," << grad_output.Size(2) << "," << grad_output.Size(3) << ")" << std::endl;
+        std::cout << "is_sym :\t" << is_sym << std::endl
+                  << std::endl;
+        m_in_defs.inputTensorNr = 4;
+        LoadTensorToGcDescriptor(&(m_in_defs.inputTensors[0]), grad_output);
         LoadTensorToGcDescriptor(&(m_in_defs.inputTensors[1]), input);
+        LoadTensorToGcDescriptor(&(m_in_defs.inputTensors[2]), input_low);
+        LoadTensorToGcDescriptor(&(m_in_defs.inputTensors[3]), input_range);
+
+        if (is_sym)
+        {
+            auto grad_input_range_pt = torch::pickle_load(get_the_bytes(fn + "/o/grad_scale.pt")).toTensor();
+            grad_input_range_ref.loadData(grad_input_range_pt);
+        }
+        else
+        {
+            auto grad_input_low_pt = torch::pickle_load(get_the_bytes(fn + "/o/grad_input_low.pt")).toTensor();
+            grad_input_low_ref.loadData(grad_input_low_pt);
+
+            auto grad_input_range_pt = torch::pickle_load(get_the_bytes(fn + "/o/grad_input_range.pt")).toTensor();
+            grad_input_range_ref.loadData(grad_input_range_pt);
+        }
+        m_in_defs.outputTensorNr = 3;
+        LoadTensorToGcDescriptor(&(m_in_defs.outputTensors[0]), grad_input);
+        LoadTensorToGcDescriptor(&(m_in_defs.outputTensors[1]), grad_input_low);
+        LoadTensorToGcDescriptor(&(m_in_defs.outputTensors[2]), grad_input_range);
+
+        vec.push_back(grad_output.GetTensorDescriptor());
+        vec.push_back(input.GetTensorDescriptor());
+        vec.push_back(input_low.GetTensorDescriptor());
+        vec.push_back(input_range.GetTensorDescriptor());
+        vec.push_back(grad_input.GetTensorDescriptor());
+        vec.push_back(grad_input_low.GetTensorDescriptor());
+        vec.push_back(grad_input_range.GetTensorDescriptor());
     }
 
-    m_in_defs.outputTensorNr = 1;
-    LoadTensorToGcDescriptor(&(m_in_defs.outputTensors[0]), output);
+    // generate input for query call
+    m_in_defs.deviceId = gcapi::DEVICE_ID_GAUDI;
+    m_in_defs.NodeParams = &param;
 
     kernelCount = 0;
     result = GetKernelNames(kernelNames, &kernelCount, gcapi::DEVICE_ID_GAUDI);
@@ -418,16 +332,7 @@ int QuantizeF32Test::runTest(Gaudi_Kernel_Name_e NameofKernel)
         ReleaseKernelNames(kernelNames, kernelCount);
         return -1;
     }
-    // generate and load tensor descriptors
-    std::vector<TensorDesc> vec;
-    if (NameofKernel == GAUDI_KERNEL_QUANTIZE_BWD_F32 || NameofKernel == GAUDI_KERNEL_QUANTIZE_BWD_F32)
-        vec.push_back(input.GetTensorDescriptor());
 
-    vec.push_back(input.GetTensorDescriptor());
-    vec.push_back(input_low.GetTensorDescriptor());
-    vec.push_back(input_range.GetTensorDescriptor());
-
-    vec.push_back(output.GetTensorDescriptor());
     // execute a simulation of the kernel using TPC simulator,
     TestBase::RunSimulation(vec, m_in_defs, m_out_defs);
     ReleaseKernelNames(kernelNames, kernelCount);
@@ -445,40 +350,154 @@ int QuantizeF32Test::runTest(Gaudi_Kernel_Name_e NameofKernel)
     }
 #endif
     int mismatched = 0;
-    float output_min, output_max, ref_min, ref_max, max_abs = 0.0f;
-    float threshold = 1e-06;
-    for (int element = 0; element < output_ref.ElementCount(); element++)
-    {
-        output_min = std::min(output_min, output.Data()[element]);
-        output_max = std::max(output_max, output.Data()[element]);
-        ref_min = std::min(ref_min, output_ref.Data()[element]);
-        ref_max = std::max(ref_max, output_ref.Data()[element]);
-        max_abs = std::max(max_abs, abs(output.Data()[element] - output_ref.Data()[element]));
-        // std::cout << "idx : " << element << ", in : " << input.Data()[element] << ", out : " << output.Data()[element] << " ref : " << output_ref.Data()[element] << std::endl;
-        if (abs(output.Data()[element] - output_ref.Data()[element]) > threshold)
-        {
-            // std::cout << "idx : " << element << ", in : " << input.Data()[element] << ", out : " << output.Data()[element] << " ref : " << output_ref.Data()[element] << std::endl;
-            // std::cout << "Mismatch found at idx: " << element << std::endl;
-            mismatched++;
-        }
-    }
-    std::cout << "Threshold :" << threshold << "\tMismatched found : " << mismatched << std::endl;
-    std::cout << "Min Value:" << std::endl;
-    std::cout << "\toutput\t:" << output_min << std::endl;
-    std::cout << "\tref\t:" << ref_min << std::endl;
-    std::cout << "Max Value:" << std::endl;
-    std::cout << "\toutput\t:" << output_max << std::endl;
-    std::cout << "\tref\t:" << ref_max << std::endl;
-    std::cout << "Max Abs\t:" << max_abs << std::endl;
-
-    std::cout << "Test JSON:\t" << fn << "\t";
-    if (is_weight)
-        std::cout << "(PER_WEIGHT_CHANNEL)" << std::endl;
-    else
-        std::cout << "(PER_ACTIVATION_CHANNEL)" << std::endl;
+    float threshold = DEFAULT_THRESHOLD;
+    float output_min = 0.0f, output_max = 0.0f, ref_min = 0.0f, ref_max = 0.0f, max_abs = 0.0f, max_rel = 0.0f;
+    int max_abs_elem = 0;
+    bool test_failed = false;
 
     if (NameofKernel == GAUDI_KERNEL_QUANTIZE_FWD_F32)
-        if (mismatched)
+    {
+        for (int element = 0; element < output_ref.ElementCount(); element++)
+        {
+            output_min = std::min(output_min, output.Data()[element]);
+            output_max = std::max(output_max, output.Data()[element]);
+            ref_min = std::min(ref_min, output_ref.Data()[element]);
+            ref_max = std::max(ref_max, output_ref.Data()[element]);
+            if (abs(output.Data()[element] - output_ref.Data()[element]) > max_abs)
+                max_abs_elem = element;
+            max_abs = std::max(max_abs, abs(output.Data()[element] - output_ref.Data()[element]));
+            max_rel = std::max(max_rel, (output.Data()[element] - output_ref.Data()[element]) / output_ref.Data()[element]);
+            if (abs(output.Data()[element] - output_ref.Data()[element]) > threshold || !(std::isnan(output.Data()[element]) == std::isnan(output_ref.Data()[element])))
+            {
+                mismatched++;
+            }
+        }
+        std::cout << "Threshold :" << threshold << "\tMismatched found : " << mismatched << std::endl;
+        std::cout << "Min Value:" << std::endl;
+        std::cout << "\toutput\t:" << output_min << std::endl;
+        std::cout << "\tref\t:" << ref_min << std::endl;
+        std::cout << "Max Value:" << std::endl;
+        std::cout << "\toutput\t:" << output_max << std::endl;
+        std::cout << "\tref\t:" << ref_max << std::endl;
+        std::cout << "Element (0-index)\t:" << max_abs_elem << std::endl;
+        std::cout << "Max Abs\t:" << max_abs << std::endl;
+        std::cout << "Max Rel\t:" << max_rel << std::endl;
+        test_failed |= mismatched;
+    }
+    else
+    {
+        std::cout << "===========" << std::endl;
+        std::cout << "grad_input" << std::endl;
+        std::cout << "===========" << std::endl;
+        for (int element = 0; element < grad_input_ref.ElementCount(); element++)
+        {
+            output_min = std::min(output_min, grad_input.Data()[element]);
+            output_max = std::max(output_max, grad_input.Data()[element]);
+            ref_min = std::min(ref_min, grad_input_ref.Data()[element]);
+            ref_max = std::max(ref_max, grad_input_ref.Data()[element]);
+            if (abs(grad_input.Data()[element] - grad_input_ref.Data()[element]) > max_abs)
+                max_abs_elem = element;
+            max_abs = std::max(max_abs, abs(grad_input.Data()[element] - grad_input_ref.Data()[element]));
+            max_rel = std::max(max_rel, (grad_input.Data()[element] - grad_input_ref.Data()[element]) / grad_input_ref.Data()[element]);
+            if (abs(grad_input.Data()[element] - grad_input_ref.Data()[element]) > threshold)
+            {
+                mismatched++;
+            }
+        }
+        std::cout << "Threshold :" << threshold << "\tMismatched found : " << mismatched << std::endl;
+        std::cout << "Min Value:" << std::endl;
+        std::cout << "\toutput\t:" << output_min << std::endl;
+        std::cout << "\tref\t:" << ref_min << std::endl;
+        std::cout << "Max Value:" << std::endl;
+        std::cout << "\toutput\t:" << output_max << std::endl;
+        std::cout << "\tref\t:" << ref_max << std::endl;
+        std::cout << "Element (0-index)\t:" << max_abs_elem << std::endl;
+
+        std::cout << "Max Abs\t:" << max_abs << std::endl;
+        std::cout << "Max Rel\t:" << max_rel << std::endl;
+        test_failed |= mismatched;
+
+        if (!is_sym)
+        {
+            output_min = output_max = ref_min = ref_max = max_abs, max_rel = 0.0f;
+            mismatched = 0;
+            max_abs_elem = 0;
+            std::cout << "==============" << std::endl;
+            std::cout << "grad_input_low" << std::endl;
+            std::cout << "==============" << std::endl;
+            for (int element = 0; element < grad_input_low_ref.ElementCount(); element++)
+            {
+                output_min = std::min(output_min, grad_input_low.Data()[element]);
+                output_max = std::max(output_max, grad_input_low.Data()[element]);
+                ref_min = std::min(ref_min, grad_input_low_ref.Data()[element]);
+                ref_max = std::max(ref_max, grad_input_low_ref.Data()[element]);
+                if (abs(grad_input_low.Data()[element] - grad_input_low_ref.Data()[element]) > max_abs)
+                    max_abs_elem = element;
+                max_abs = std::max(max_abs, abs(grad_input_low.Data()[element] - grad_input_low_ref.Data()[element]));
+                max_rel = std::max(max_rel, (grad_input_low.Data()[element] - grad_input_low_ref.Data()[element]) / grad_input_low_ref.Data()[element]);
+                if (abs(grad_input_low.Data()[element] - grad_input_low_ref.Data()[element]) > threshold)
+                {
+                    mismatched++;
+                }
+            }
+            std::cout << "Threshold :" << threshold << "\tMismatched found : " << mismatched << std::endl;
+            std::cout << "Min Value:" << std::endl;
+            std::cout << "\toutput\t:" << output_min << std::endl;
+            std::cout << "\tref\t:" << ref_min << std::endl;
+            std::cout << "Max Value:" << std::endl;
+            std::cout << "\toutput\t:" << output_max << std::endl;
+            std::cout << "\tref\t:" << ref_max << std::endl;
+            std::cout << "Element (0-index)\t:" << max_abs_elem << std::endl;
+
+            std::cout << "Max Abs\t:" << max_abs << std::endl;
+            std::cout << "Max Rel\t:" << max_rel << std::endl;
+            test_failed |= mismatched;
+        }
+
+        output_min = output_max = ref_min = ref_max = max_abs, max_rel = 0.0f;
+        mismatched = 0;
+        max_abs_elem = 0;
+        std::cout << "==============" << std::endl;
+        if (is_sym)
+        {
+            std::cout << "grad_scale" << std::endl;
+        }
+        else
+        {
+            std::cout << "grad_input_range" << std::endl;
+        }
+        std::cout << "==============" << std::endl;
+        for (int element = 0; element < grad_input_range_ref.ElementCount(); element++)
+        {
+            output_min = std::min(output_min, grad_input_range.Data()[element]);
+            output_max = std::max(output_max, grad_input_range.Data()[element]);
+            ref_min = std::min(ref_min, grad_input_range_ref.Data()[element]);
+            ref_max = std::max(ref_max, grad_input_range_ref.Data()[element]);
+            if (abs(grad_input_range.Data()[element] - grad_input_range_ref.Data()[element]) > max_abs)
+                max_abs_elem = element;
+            max_abs = std::max(max_abs, abs(grad_input_range.Data()[element] - grad_input_range_ref.Data()[element]));
+            max_rel = std::max(max_rel, (grad_input_range.Data()[element] - grad_input_range_ref.Data()[element]) / grad_input_range_ref.Data()[element]);
+            if (abs(grad_input_range.Data()[element] - grad_input_range_ref.Data()[element]) > threshold)
+            {
+                mismatched++;
+            }
+        }
+        std::cout << "Threshold :" << threshold << "\tMismatched found : " << mismatched << std::endl;
+        std::cout << "Min Value:" << std::endl;
+        std::cout << "\toutput\t:" << output_min << std::endl;
+        std::cout << "\tref\t:" << ref_min << std::endl;
+        std::cout << "Max Value:" << std::endl;
+        std::cout << "\toutput\t:" << output_max << std::endl;
+        std::cout << "\tref\t:" << ref_max << std::endl;
+        std::cout << "Element (0-index)\t:" << max_abs_elem << std::endl;
+
+        std::cout << "Max Abs\t:" << max_abs << std::endl;
+        std::cout << "Max Rel\t:" << max_rel << std::endl;
+        test_failed |= mismatched;
+    }
+
+    if (NameofKernel == GAUDI_KERNEL_QUANTIZE_FWD_F32)
+        if (test_failed)
         {
             std::cout << "Quantize FWD F32 test failed!!" << std::endl;
             return -1;
@@ -488,7 +507,7 @@ int QuantizeF32Test::runTest(Gaudi_Kernel_Name_e NameofKernel)
             std::cout << "Quantize FWD F32 test pass!!" << std::endl;
             return 0;
         }
-    else if (mismatched)
+    else if (test_failed)
     {
         std::cout << "Quantize BWD F32 test failed!!" << std::endl;
         return -1;
