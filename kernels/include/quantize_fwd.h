@@ -79,6 +79,7 @@ void main(tensor input, tensor input_low, tensor input_range, tensor output, int
 
     int scale_dim = 5;
     int scale_count = 1;
+    int is_2D = 0;
 
     ScaleType scale_type = SINGLE_SCALE;
     for (int i = 0; i < scale_dim; i++)
@@ -88,63 +89,104 @@ void main(tensor input, tensor input_low, tensor input_range, tensor output, int
 
     if (scale_count > 1)
     {
-        if (get_dim_size(input_range, 3) > 1)
+        is_2D = (get_dim_size(input_range, 2) == 1 && get_dim_size(input_range, 3) == 1 && get_dim_size(input_range, 4) == 1) ? 1 : 0;
+        if (get_dim_size(input_range, (is_2D) ? 1 : 3) > 1)
         {
             scale_type = PER_WEIGHT_CHANNEL;
         }
-        else if (get_dim_size(input_range, 2) > 1)
+        else if (get_dim_size(input_range, (is_2D) ? 0 : 2) > 1)
         {
             scale_type = PER_ACTIVATION_CHANNEL;
         }
     }
 
-#pragma loop_taken
-    for (int d = depthStart; d < depthEnd; d += depthStep)
+    if (is_2D)
     {
-        ifmCoords[depth] = d;
-
+        ifmCoords[height] = heightStart;
+        ifmCoords[batch] = batchStart;
+        ifmCoords[fifthDim] = fifthDimStart;
 #pragma loop_taken
-        for (int f = fifthDimStart; f < fifthDimEnd; f += fifthDimStep)
+        for (int d = depthStart; d < depthEnd; d += depthStep)
         {
-            ifmCoords[fifthDim] = f;
-
-#pragma loop_taken
-            for (int b = batchStart; b < batchEnd; b += batchStep)
-            {
-                ifmCoords[batch] = b;
-                if (scale_type == PER_WEIGHT_CHANNEL)
-                    lowRangeCoords[batch] = b;
-
-#pragma loop_taken
-                for (int h = heightStart; h < heightEnd; h += heightStep)
-                {
-                    ifmCoords[height] = h;
-                    if (scale_type == PER_ACTIVATION_CHANNEL)
-                        lowRangeCoords[height] = h;
+            ifmCoords[depth] = d;
 #pragma loop_taken
 #pragma unroll 4
-                    for (int w = widthStart; w < widthEnd; w += 1)
+            for (int w = widthStart; w < widthEnd; w += 1)
+            {
+                ifmCoords[width] = w;
+                if (scale_type == PER_WEIGHT_CHANNEL)
+                    lowRangeCoords[width] = w;
+
+                float64 input_val = v_f32_ld_tnsr_b(ifmCoords, input);
+                float64 input_low_val = s_f32_ld_g((__global__ float *)gen_addr(lowRangeCoords, input_low));
+                float64 input_range_val = s_f32_ld_g((__global__ float *)gen_addr(lowRangeCoords, input_range));
+
+                float64 scale = (levels - 1) / input_range_val;
+                float64 output_val = v_f32_max_b(v_f32_min_b(input_val, input_low_val + input_range_val), input_low_val);
+                float64 zero_point = v_f32_custom_RHAZ(-input_low_val * scale);
+
+                output_val -= input_low_val;
+                output_val *= scale;
+                output_val -= zero_point;
+
+                output_val = v_f32_custom_RHAZ(output_val);
+                output_val = output_val / scale;
+
+                v_f32_st_tnsr(ifmCoords, output, output_val);
+            }
+        }
+    }
+    else
+    {
+#pragma loop_taken
+        for (int d = depthStart; d < depthEnd; d += depthStep)
+        {
+            ifmCoords[depth] = d;
+
+#pragma loop_taken
+            for (int f = fifthDimStart; f < fifthDimEnd; f += fifthDimStep)
+            {
+                ifmCoords[fifthDim] = f;
+
+#pragma loop_taken
+                for (int b = batchStart; b < batchEnd; b += batchStep)
+                {
+                    ifmCoords[batch] = b;
+                    if (scale_type == PER_WEIGHT_CHANNEL)
                     {
-                        ifmCoords[width] = w;
+                        lowRangeCoords[batch] = b;
+                    }
+#pragma loop_taken
+                    for (int h = heightStart; h < heightEnd; h += heightStep)
+                    {
+                        ifmCoords[height] = h;
+                        if (scale_type == PER_ACTIVATION_CHANNEL)
+                        {
+                            lowRangeCoords[height] = h;
+                        }
+#pragma loop_taken
+#pragma unroll 4
+                        for (int w = widthStart; w < widthEnd; w += 1)
+                        {
+                            ifmCoords[width] = w;
 
-                        float64 input_val = v_f32_ld_tnsr_b(ifmCoords, input);
-                        float64 input_low_val = s_f32_ld_g((__global__ float *)gen_addr(lowRangeCoords, input_low));
-                        float64 input_range_val = s_f32_ld_g((__global__ float *)gen_addr(lowRangeCoords, input_range));
+                            float64 input_val = v_f32_ld_tnsr_b(ifmCoords, input);
+                            float64 input_low_val = s_f32_ld_g((__global__ float *)gen_addr(lowRangeCoords, input_low));
+                            float64 input_range_val = s_f32_ld_g((__global__ float *)gen_addr(lowRangeCoords, input_range));
 
-                        float64 scale = (levels - 1) / input_range_val;
-                        float64 output_val = v_f32_max_b(v_f32_min_b(input_val, input_low_val + input_range_val), input_low_val);
-                        // float64 zero_point = v_f32_nearbyint_b(-input_low_val * scale);
-                        float64 zero_point = v_f32_custom_RHAZ(-input_low_val * scale);
+                            float64 scale = (levels - 1) / input_range_val;
+                            float64 output_val = v_f32_max_b(v_f32_min_b(input_val, input_low_val + input_range_val), input_low_val);
+                            float64 zero_point = v_f32_custom_RHAZ(-input_low_val * scale);
 
-                        output_val -= input_low_val;
-                        output_val *= scale;
-                        output_val -= zero_point;
+                            output_val -= input_low_val;
+                            output_val *= scale;
+                            output_val -= zero_point;
 
-                        // output_val = v_f32_nearbyint_b(output_val);
-                        output_val = v_f32_custom_RHAZ(output_val);
-                        output_val = output_val / scale;
+                            output_val = v_f32_custom_RHAZ(output_val);
+                            output_val = output_val / scale;
 
-                        v_f32_st_tnsr(ifmCoords, output, output_val);
+                            v_f32_st_tnsr(ifmCoords, output, output_val);
+                        }
                     }
                 }
             }
